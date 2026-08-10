@@ -1,0 +1,7 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/lemehmet/mdlook/security/advisories/new
+    about: >-
+      Report privately instead of opening an issue. mdlook renders untrusted input, so anything
+      that gets a terminal escape sequence through to the terminal belongs here.

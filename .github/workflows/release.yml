@@ -1,0 +1,109 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to build, for a dry run
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          # Apple Silicon only. Intel Macs cannot run this binary and are not
+          # built for; that platform is served by building from source, which
+          # needs nothing but a Rust toolchain.
+          - { os: macos-latest, target: aarch64-apple-darwin }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+
+      # A shipped binary should not carry the path it was built from. Without
+      # this, every panic location in the program and its dependencies embeds the
+      # builder's home directory. Cargo's own `trim-paths` would do this, but it
+      # is still unstable, so the flags are passed here where the environment is
+      # known.
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }} --bin mdlook
+        env:
+          RUSTFLAGS: >-
+            --remap-path-prefix=${{ github.workspace }}=/mdlook
+            --remap-path-prefix=${{ runner.temp }}=/tmp
+            --remap-path-prefix=/Users/runner=/build
+            --remap-path-prefix=/home/runner=/build
+
+      - name: Confirm no build paths survived
+        run: |
+          binary=target/${{ matrix.target }}/release/mdlook
+          if strings -a "$binary" | grep -E '/(home|Users)/runner'; then
+            echo "::error::the binary carries the build machine's paths"
+            exit 1
+          fi
+
+      # Built natively on each platform rather than cross-compiled, so the
+      # version that ships is the one that was exercised here.
+      - name: Check it runs
+        run: |
+          binary=./target/${{ matrix.target }}/release/mdlook
+          "$binary" --version
+          "$binary" --plain --width 80 README.md | head -20
+          # A renderer that silently emits nothing would pass every check above.
+          lines=$("$binary" --plain --width 80 README.md | wc -l)
+          [ "$lines" -gt 50 ] || { echo "::error::rendered only $lines lines"; exit 1; }
+
+      - name: Package
+        run: |
+          name="mdlook-${{ github.ref_name }}-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp target/${{ matrix.target }}/release/mdlook "dist/$name/"
+          cp README.md LICENSE CHANGELOG.md "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          # Written from inside dist so the file records a bare name. Recorded as
+          # "dist/..." it verifies only from the directory above the one it ships
+          # in, which is nobody's layout.
+          ( cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256" )
+
+      - name: Confirm the checksum verifies where it ships
+        run: |
+          cd dist
+          shasum -a 256 -c "mdlook-${{ github.ref_name }}-${{ matrix.target }}.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mdlook-${{ matrix.target }}
+          path: dist/*.tar.gz*
+
+  publish:
+    name: Publish
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

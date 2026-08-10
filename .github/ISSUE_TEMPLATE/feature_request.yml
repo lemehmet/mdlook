@@ -1,0 +1,30 @@
+name: Feature request
+description: Something mdlook should do that it does not
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        mdlook is deliberately a viewer for one document at a time: no editing, no file browser,
+        and links are listed rather than followed. Proposals that change that are not off-limits,
+        but they need a case.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The situation you are in, rather than the feature you have in mind for it.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like it to do?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What do you do today instead?

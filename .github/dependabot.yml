@@ -1,0 +1,23 @@
+version: 2
+updates:
+  # Cargo dependencies, grouped so a quiet week produces one pull request rather
+  # than eight, and weekly rather than daily: a markdown renderer's dependencies
+  # do not move fast enough to warrant more noise than that.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      cargo:
+        patterns: ["*"]
+
+  # The actions in the workflows, which are the part of the supply chain that
+  # runs with repository credentials.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]

@@ -1,0 +1,57 @@
+[package]
+name = "mdlook"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+description = "Terminal markdown reader that reflows paragraphs to your terminal width and turns search into a navigable index of matches"
+license = "Apache-2.0"
+repository = "https://github.com/lemehmet/mdlook"
+homepage = "https://github.com/lemehmet/mdlook"
+authors = ["mdlook contributors"]
+keywords = ["markdown", "tui", "viewer", "pager", "terminal"]
+categories = ["command-line-utilities", "text-processing"]
+readme = "README.md"
+# The pty harness is a development tool and the workflows are repository
+# furniture; neither belongs in the published archive.
+exclude = ["/.github", "/tests/tui_capture.py"]
+
+[[bin]]
+name = "mdlook"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.6", features = ["derive"] }
+crossterm = "0.29"
+pulldown-cmark = { version = "0.13", default-features = false, features = ["simd", "html"] }
+ratatui = "0.30"
+unicode-width = "0.2"
+
+# `default-features = false` + `regex-fancy` keeps this pure Rust: the default
+# feature set pulls in `onig`, which needs a C toolchain to build.
+syntect = { version = "5.3", default-features = false, features = [
+    "parsing",
+    "default-syntaxes",
+    "default-themes",
+    "regex-fancy",
+] }
+
+# syntect's bundled syntaxes predate most of what modern API docs are written in
+# — no TypeScript, Kotlin, Swift, TOML, Dockerfile, Zig, Nix or C#. two-face
+# ships bat's much larger set, which covers all of them.
+two-face = { version = "0.5", default-features = false, features = ["syntect-fancy"] }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+# Symbols are of no use in a shipped binary and dropping them is worth several
+# megabytes. Build paths are handled separately in the release workflow, since
+# Cargo's own `trim-paths` is still unstable.
+strip = true

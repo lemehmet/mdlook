@@ -1,0 +1,68 @@
+name: Bug report
+description: Something mdlook rendered wrongly, or did not do that it should
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time. For a rendering problem, **the source markdown is the single
+        most useful thing you can attach** — a reduced snippet that still shows it is ideal, but
+        the whole file is fine too.
+
+  - type: input
+    id: version
+    attributes:
+      label: mdlook version
+      description: Output of `mdlook --version`
+      placeholder: mdlook 0.1.0
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: Terminal and OS
+      description: >-
+        Which terminal emulator, and which OS. The terminal matters more than usual here: they
+        disagree about how wide some glyphs are, which is enough to misalign a table.
+      placeholder: WezTerm 20240203, macOS 15.2
+    validations:
+      required: true
+
+  - type: textarea
+    id: source
+    attributes:
+      label: The markdown that triggers it
+      description: A snippet that reproduces the problem.
+      render: markdown
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What you expected, and what you got
+      description: >-
+        For a layout problem, `mdlook --plain --no-color --width 80 file.md` pasted into a code
+        block shows the exact output without your terminal in the way.
+    validations:
+      required: true
+
+  - type: input
+    id: width
+    attributes:
+      label: Terminal width, if it matters
+      description: Some problems only appear at a particular width.
+      placeholder: "80"
+
+  - type: checkboxes
+    id: kind
+    attributes:
+      label: Does it involve any of these?
+      options:
+        - label: A crash or panic
+        - label: Non-ASCII text, emoji, or CJK
+        - label: Search, the outline, or the link list
+        - label: >-
+            Terminal escape sequences appearing to take effect. (If so, please use Security ▸
+            Report a vulnerability instead of a public issue.)
