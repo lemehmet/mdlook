@@ -4,6 +4,63 @@ Notable changes, newest first. This project follows
 [semantic versioning](https://semver.org); while the major version is 0,
 breaking changes may land in a minor release.
 
+## v0.2.0 — 2026-08-24
+
+### Files that are not markdown
+
+- Every file mdlook opens is now classified before it is rendered. Markdown is
+  decided by extension; anything else that decodes as text is shown in a
+  numbered, syntax-highlighted whole-file view; a binary is identified rather
+  than dumped. This applies to a named file too, so `mdlook main.rs` now shows
+  highlighted Rust instead of parsing it as markdown. `mdlook README.md` is
+  unchanged.
+- Syntax for a whole file is resolved by name, then by extension, then by
+  shebang — so `Makefile`, `Dockerfile` and an extensionless script with
+  `#!/usr/bin/env bash` all highlight. Files over 256 KB are shown unhighlighted.
+- Binaries are identified in-process against a built-in table of magic numbers,
+  including decoded ELF, PE and Mach-O headers, so the architecture is reported
+  without running `file(1)`.
+
+### File browser
+
+- `mdlook <dir>` opens a tree on the left and previews the selection on the
+  right. `--browse` does the same alongside a named file, with that file
+  revealed and selected, and on its own browses the working directory rather
+  than waiting on standard input. Without the flag, and without a config asking
+  for it, nothing changes.
+- `Ctrl-B` shows and hides the tree; `Tab` moves focus between the panes; `/`
+  filters the tree by name; `.` toggles dotfiles. A live search survives moving
+  to another file, so a query can be carried through a directory.
+- Read-only by design: no rename, delete or edit. Directory symlinks are shown
+  but never followed, listings are sorted explicitly so two machines agree, and
+  only regular files are opened — reading a FIFO on a cursor move would hang.
+
+### Config
+
+- An optional `config.toml` at `$XDG_CONFIG_HOME/mdlook/` (or `~/.config/mdlook/`,
+  or `%APPDATA%\mdlook\` on Windows), read but never written. Sets `browse`,
+  `theme`, `width`, and a `[browser]` section. `--config <PATH>` and `--no-config`
+  override where it comes from; a flag always beats the file. An unrecognised key
+  is an error rather than silently ignored.
+- `browser.probe_command` opts into identifying binaries with an external command
+  such as `file --brief`. Unset by default, and unset means mdlook starts no
+  subprocess at all.
+
+### Fixed
+
+- Text prompts no longer insert a letter when a control chord is pressed:
+  a terminal reports Ctrl-J as `Char('j')` with a modifier, and the search prompt
+  was typing the `j`.
+
+### Changed
+
+- `App::new` takes a `Content` rather than a `Document`. `Document` implements
+  `Into<Content>`, so `parse(source).into()` is the migration.
+- `RenderedDoc` gained `content_offset`, the byte offset at which each line's
+  searchable text begins. It is zero for markdown; the whole-file view uses it so
+  that searching for `42` finds the number in the code, not the line number in
+  the gutter.
+
 ## v0.1.0 — 2026-08-10
 
 First release.

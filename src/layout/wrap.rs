@@ -266,6 +266,44 @@ impl Wrapper {
     }
 }
 
+/// Cut a styled line down to `width` display columns.
+///
+/// Long lines are truncated rather than wrapped: re-wrapping code destroys the
+/// alignment that makes it readable, and a viewer is for recognising what a file
+/// says, not for reading every column of a minified bundle. The span the limit
+/// falls inside is split rather than dropped, so the cut lands exactly on the
+/// column and not at the nearest style boundary.
+pub fn truncate(spans: Vec<Span<'static>>, width: usize) -> Vec<Span<'static>> {
+    let mut out: Vec<Span<'static>> = Vec::with_capacity(spans.len());
+    let mut used = 0usize;
+
+    for span in spans {
+        let w = text_width(&span.content);
+        if used + w <= width {
+            used += w;
+            out.push(span);
+            continue;
+        }
+
+        let room = width - used;
+        if room > 0 {
+            let cut: String = span
+                .content
+                .chars()
+                .scan(0usize, |acc, c| {
+                    *acc += char_width(c);
+                    (*acc <= room).then_some(c)
+                })
+                .collect();
+            if !cut.is_empty() {
+                out.push(Span::styled(cut, span.style));
+            }
+        }
+        break;
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,17 +1,18 @@
-//! Syntax highlighting for fenced code blocks.
+//! Syntax highlighting, for fenced code blocks and for whole files.
 //!
 //! syntect's syntax and theme sets are embedded in the binary and loaded once.
 //! Nothing is read from disk or the environment, so a given (code, language,
 //! theme) triple always highlights the same way — on any machine, in any
 //! terminal.
 
+use std::path::Path;
 use std::sync::LazyLock;
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{FontStyle, Style as SynStyle, ThemeSet};
-use syntect::parsing::SyntaxSet;
+use syntect::parsing::{SyntaxReference, SyntaxSet};
 use syntect::util::LinesWithEndings;
 
 use super::theme::{Theme, ThemeKind};
@@ -58,6 +59,28 @@ pub fn supports(lang: &str) -> bool {
     resolve(lang).is_some()
 }
 
+/// Resolve a syntax for a whole file, from its name and its opening line.
+///
+/// The ladder deliberately differs from the fenced-code path. A fence tag is the
+/// author telling us what the block is, so an explicit-but-unknown tag is left
+/// alone rather than second-guessed. A file *name* is much weaker evidence — it
+/// may be `notes.txt`, or carry no extension at all — so when the name resolves
+/// to nothing we fall through to the shebang, which is usually right and is the
+/// only thing that identifies an extensionless script.
+fn resolve_file(name: &str, body: &str) -> Option<&'static SyntaxReference> {
+    let path = Path::new(name);
+    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or(name);
+    let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+
+    // The whole file name goes first: a syntax's declared extension list is also
+    // where bare names live, which is what matches `Makefile` and `Dockerfile`.
+    SYNTAXES
+        .find_syntax_by_extension(file_name)
+        .or_else(|| SYNTAXES.find_syntax_by_extension(extension))
+        .or_else(|| (!extension.is_empty()).then(|| resolve(extension)).flatten())
+        .or_else(|| SYNTAXES.find_syntax_by_first_line(body))
+}
+
 /// Highlight `code`, returning one span vector per line.
 ///
 /// Falls back to unhighlighted-but-styled lines when the language is unknown or
@@ -85,10 +108,46 @@ pub fn highlight(code: &str, lang: Option<&str>, theme: &Theme) -> Vec<Vec<Span<
         return plain(&code, theme);
     };
 
+    run(syntax, syntax_theme, &code, theme)
+}
+
+/// Above this, a file is shown unhighlighted.
+///
+/// syntect is linear in the input with a regex engine behind it, and the browser
+/// re-highlights whenever the selection moves. A quarter-megabyte is past
+/// anything anyone reads top to bottom and comfortably inside a keypress budget.
+const MAX_HIGHLIGHT: usize = 256 * 1024;
+
+/// Highlight a whole file, identified by its name rather than a fence tag.
+pub fn highlight_file(name: &str, body: &str, theme: &Theme) -> Vec<Vec<Span<'static>>> {
+    let body = expand_tabs(body);
+
+    if theme.kind == ThemeKind::Mono || theme.syntax_theme.is_empty() || body.len() > MAX_HIGHLIGHT
+    {
+        return plain(&body, theme);
+    }
+
+    let Some(syntax) = resolve_file(name, &body) else {
+        return plain(&body, theme);
+    };
+    let Some(syntax_theme) = THEMES.themes.get(theme.syntax_theme) else {
+        return plain(&body, theme);
+    };
+
+    run(syntax, syntax_theme, &body, theme)
+}
+
+/// The highlighting loop itself, shared by the fence and whole-file paths.
+fn run(
+    syntax: &SyntaxReference,
+    syntax_theme: &syntect::highlighting::Theme,
+    code: &str,
+    theme: &Theme,
+) -> Vec<Vec<Span<'static>>> {
     let mut highlighter = HighlightLines::new(syntax, syntax_theme);
     let mut out = Vec::new();
 
-    for line in LinesWithEndings::from(&code) {
+    for line in LinesWithEndings::from(code) {
         match highlighter.highlight_line(line, &SYNTAXES) {
             Ok(ranges) => out.push(
                 ranges

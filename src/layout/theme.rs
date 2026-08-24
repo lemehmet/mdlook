@@ -45,6 +45,17 @@ pub struct Theme {
     pub code_block_bg: Option<Color>,
     pub code_block_fg: Style,
     pub code_fence_label: Style,
+    /// The line-number gutter in the whole-file view.
+    pub line_number: Style,
+    /// Directory rows in the file browser.
+    pub tree_dir: Style,
+    /// The browser's selection, when the browser has the keyboard.
+    pub tree_selection: Style,
+    /// The browser's selection when focus is in the document, so the reader can
+    /// still see where they were without it competing for attention.
+    pub tree_selection_idle: Style,
+    /// The rule between the browser and the document.
+    pub tree_divider: Style,
     pub link: Style,
     pub quote_bar: Style,
     pub quote_text: Style,
@@ -99,6 +110,11 @@ impl Theme {
             code_block_bg: Some(Color::Rgb(0x1c, 0x1f, 0x26)),
             code_block_fg: Style::new().fg(Color::Gray),
             code_fence_label: Style::new().fg(Color::DarkGray),
+            line_number: Style::new().fg(Color::DarkGray),
+            tree_dir: bold.fg(Color::Blue),
+            tree_selection: Style::new().bg(Color::Cyan).fg(Color::Black),
+            tree_selection_idle: Style::new().bg(Color::Rgb(0x30, 0x34, 0x3d)),
+            tree_divider: Style::new().fg(Color::DarkGray),
             link: Style::new().fg(Color::Cyan).add_modifier(Modifier::UNDERLINED),
             quote_bar: Style::new().fg(Color::DarkGray),
             quote_text: Style::new().fg(Color::Gray).add_modifier(Modifier::ITALIC),
@@ -138,6 +154,9 @@ impl Theme {
             code_inline: Style::new().fg(Color::Red),
             code_block_bg: Some(Color::Rgb(0xf2, 0xf2, 0xf2)),
             code_block_fg: Style::new().fg(Color::Black),
+            tree_dir: bold.fg(Color::Blue),
+            tree_selection: Style::new().bg(Color::Blue).fg(Color::White),
+            tree_selection_idle: Style::new().bg(Color::Rgb(0xe2, 0xe4, 0xe8)),
             quote_text: Style::new().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
             syntax_theme: "InspiredGitHub",
             search_match: Style::new().bg(Color::Yellow).fg(Color::Black),
@@ -166,6 +185,11 @@ impl Theme {
             code_block_bg: None,
             code_block_fg: plain,
             code_fence_label: plain.add_modifier(Modifier::DIM),
+            line_number: plain.add_modifier(Modifier::DIM),
+            tree_dir: bold,
+            tree_selection: plain.add_modifier(Modifier::REVERSED),
+            tree_selection_idle: plain.add_modifier(Modifier::UNDERLINED),
+            tree_divider: plain.add_modifier(Modifier::DIM),
             link: plain.add_modifier(Modifier::UNDERLINED),
             quote_bar: plain,
             quote_text: plain.add_modifier(Modifier::ITALIC),

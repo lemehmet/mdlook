@@ -32,7 +32,7 @@ Final section with a needle at the end.
 ";
 
 fn app() -> App {
-    let mut app = App::new(parse(DOC), "test.md".into(), Theme::default(), 80);
+    let mut app = App::new(parse(DOC).into(), "test.md".into(), Theme::default(), 80);
     app.viewport = 10;
     app
 }
@@ -94,7 +94,7 @@ fn search_matches_rendered_text_not_markdown_source() {
     // The heading is `## Beta` in source but `Beta` on screen, and inline code /
     // emphasis markers are likewise absent from what you can search.
     let mut app = App::new(
-        parse("## `fetch_user()`\n\nSome **bold** text."),
+        parse("## `fetch_user()`\n\nSome **bold** text.").into(),
         "t".into(),
         Theme::default(),
         80,

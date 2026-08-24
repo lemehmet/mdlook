@@ -3,8 +3,11 @@
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use crate::doc::Document;
-use crate::layout::{layout, wrap::text_width, RenderedDoc, Theme};
+use std::path::{Path, PathBuf};
+
+use crate::content::Content;
+use crate::files::Tree;
+use crate::layout::{wrap::text_width, RenderedDoc, Theme};
 use crate::ui::popup::{Popup, PopupKind, PopupRow};
 use crate::ui::search::Search;
 
@@ -15,10 +18,25 @@ pub enum Mode {
     SearchInput,
     /// A popup has focus and the arrow keys move its selection.
     Popup,
+    /// Typing a filter for the file browser.
+    FilterInput,
+}
+
+/// Which pane the keyboard is driving.
+///
+/// Deliberately separate from [`Mode`] rather than folded into it. `Mode`
+/// describes what the *document* pane is doing — reading, typing a query,
+/// working a list — and those states are modal: they take the keyboard wherever
+/// focus happens to be. Multiplying the two together would give a state per
+/// combination, most of which mean the same thing.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Focus {
+    Tree,
+    Content,
 }
 
 pub struct App {
-    pub document: Document,
+    pub content: Content,
     pub rendered: RenderedDoc,
     pub theme: Theme,
     pub title: String,
@@ -32,13 +50,35 @@ pub struct App {
     restore_scroll: usize,
     pub quit: bool,
     pub message: Option<String>,
+
+    // -- file browser ------------------------------------------------------
+    /// Absent when mdlook was pointed at a single file, which is the default.
+    pub sidebar: Option<Tree>,
+    /// Whether the browser is drawn. Toggling hides it without losing the tree,
+    /// so coming back lands where you left rather than at the root.
+    pub sidebar_visible: bool,
+    pub sidebar_width: usize,
+    /// External command used to identify binaries, if the reader configured one.
+    pub probe_command: Option<String>,
+    /// Columns the browser actually occupied last frame, including its divider.
+    ///
+    /// Recorded by the renderer so the event loop can tell which pane the mouse
+    /// is over. The requested width is not enough: the browser narrows itself on
+    /// a small terminal and disappears entirely on a very small one.
+    pub sidebar_columns: u16,
+    pub focus: Focus,
+    /// What the document pane is currently showing, so moving the selection
+    /// onto a file already open does not re-read and re-highlight it.
+    previewed: Option<PathBuf>,
+    /// Filter text being typed, restored on cancel.
+    restore_filter: String,
 }
 
 impl App {
-    pub fn new(document: Document, title: String, theme: Theme, width: usize) -> Self {
-        let rendered = layout(&document, width, &theme);
+    pub fn new(content: Content, title: String, theme: Theme, width: usize) -> Self {
+        let rendered = content.layout(width, &theme);
         Self {
-            document,
+            content,
             rendered,
             theme,
             // The title is a path from the command line, drawn into the status
@@ -53,7 +93,164 @@ impl App {
             restore_scroll: 0,
             quit: false,
             message: None,
+            sidebar: None,
+            sidebar_visible: false,
+            sidebar_width: crate::config::DEFAULT_SIDEBAR_WIDTH,
+            probe_command: None,
+            sidebar_columns: 0,
+            focus: Focus::Content,
+            previewed: None,
+            restore_filter: String::new(),
         }
+    }
+
+    /// Attach a file browser, which starts visible and focused.
+    pub fn with_sidebar(mut self, tree: Tree, width: usize, probe: Option<String>) -> Self {
+        self.probe_command = probe;
+        self.previewed = tree.selected_file().map(Path::to_path_buf);
+        self.sidebar = Some(tree);
+        self.sidebar_visible = true;
+        self.sidebar_width = width;
+        self.focus = Focus::Tree;
+        // The title was built from the command line, which may be an absolute
+        // path; now that there is a root to measure against, shorten it.
+        if let Some(path) = self.previewed.clone() {
+            self.title = self.display_path(&path);
+        }
+        self
+    }
+
+    // -- the browser -------------------------------------------------------
+
+    /// Whether the browser is attached *and* currently drawn.
+    pub fn browsing(&self) -> bool {
+        self.sidebar.is_some() && self.sidebar_visible
+    }
+
+    /// Show or hide the browser. With it hidden the document has the whole
+    /// frame, which is the point; focus follows, because there is nothing left
+    /// to focus.
+    pub fn toggle_sidebar(&mut self) {
+        if self.sidebar.is_none() {
+            return;
+        }
+        self.sidebar_visible = !self.sidebar_visible;
+        self.focus = if self.sidebar_visible { Focus::Tree } else { Focus::Content };
+    }
+
+    pub fn toggle_focus(&mut self) {
+        if !self.browsing() {
+            self.focus = Focus::Content;
+            return;
+        }
+        self.focus = match self.focus {
+            Focus::Tree => Focus::Content,
+            Focus::Content => Focus::Tree,
+        };
+    }
+
+    /// Move the browser's cursor and preview whatever it lands on.
+    pub fn tree_move(&mut self, action: impl FnOnce(&mut Tree)) {
+        let Some(tree) = self.sidebar.as_mut() else { return };
+        action(tree);
+        self.sync_preview();
+    }
+
+    /// Load the selected file into the document pane, unless it is already
+    /// there. Directories and notes leave the pane alone: moving the cursor
+    /// over a folder should not blank out what you were reading.
+    fn sync_preview(&mut self) {
+        let Some(tree) = self.sidebar.as_ref() else { return };
+        let Some(path) = tree.selected_file().map(Path::to_path_buf) else { return };
+        if self.previewed.as_deref() == Some(path.as_path()) {
+            return;
+        }
+        self.load(&path);
+    }
+
+    fn load(&mut self, path: &Path) {
+        self.content = Content::preview(path, self.probe_command.as_deref());
+        self.title = self.display_path(path);
+        self.rendered = self.content.layout(self.rendered.width.max(8), &self.theme);
+        self.previewed = Some(path.to_path_buf());
+        self.scroll = 0;
+        self.restore_scroll = 0;
+        self.popup = None;
+        // A query survives the move to another file, so you can walk a tree
+        // looking for where something is mentioned. It has to be re-run,
+        // because the offsets belonged to the old document.
+        if self.search.is_active() {
+            self.search.refresh(&self.rendered);
+        }
+    }
+
+    /// How a path is named in the status bar.
+    ///
+    /// Relative to the browser's root, because that is the tree the reader is
+    /// looking at; an absolute path would spend the bar on directories that are
+    /// the same for every file in the session.
+    fn display_path(&self, path: &Path) -> String {
+        let shown = self
+            .sidebar
+            .as_ref()
+            .and_then(|tree| path.strip_prefix(tree.root()).ok())
+            .unwrap_or(path);
+        shown.to_string_lossy().chars().map(crate::layout::wrap::sanitize).collect()
+    }
+
+    /// Open the selection: expand a directory, or move to the document pane if
+    /// the cursor is already on the file being shown.
+    pub fn open_selection(&mut self) {
+        let Some(tree) = self.sidebar.as_mut() else { return };
+        match tree.selection().map(|row| (row.is_dir, row.path.clone())) {
+            Some((true, _)) => {
+                tree.toggle();
+            }
+            Some((false, path)) => {
+                if self.previewed.as_deref() != Some(path.as_path()) {
+                    self.load(&path);
+                }
+                self.focus = Focus::Content;
+            }
+            None => {}
+        }
+    }
+
+    // -- browser filter ----------------------------------------------------
+
+    pub fn open_filter(&mut self) {
+        let Some(tree) = self.sidebar.as_ref() else { return };
+        self.restore_filter = tree.filter.clone();
+        self.mode = Mode::FilterInput;
+    }
+
+    pub fn filter_push(&mut self, c: char) {
+        let Some(tree) = self.sidebar.as_mut() else { return };
+        let mut filter = tree.filter.clone();
+        filter.push(c);
+        tree.set_filter(filter);
+        self.sync_preview();
+    }
+
+    pub fn filter_pop(&mut self) {
+        let Some(tree) = self.sidebar.as_mut() else { return };
+        let mut filter = tree.filter.clone();
+        filter.pop();
+        tree.set_filter(filter);
+        self.sync_preview();
+    }
+
+    pub fn filter_commit(&mut self) {
+        self.mode = Mode::Normal;
+    }
+
+    pub fn filter_cancel(&mut self) {
+        let restore = std::mem::take(&mut self.restore_filter);
+        if let Some(tree) = self.sidebar.as_mut() {
+            tree.set_filter(restore);
+        }
+        self.mode = Mode::Normal;
+        self.sync_preview();
     }
 
     // -- scrolling ---------------------------------------------------------
@@ -119,7 +316,7 @@ impl App {
             .map(|(index, a)| (index, self.scroll - a.line));
         let fraction = self.scroll as f64 / self.rendered.len().max(1) as f64;
 
-        self.rendered = layout(&self.document, width, &self.theme);
+        self.rendered = self.content.layout(width, &self.theme);
 
         self.scroll = match anchored {
             Some((index, offset)) => match self.rendered.anchors.get(index) {
@@ -271,7 +468,7 @@ impl App {
             PopupKind::Search => self.search_popup(),
             PopupKind::Links => self.links_popup(),
             PopupKind::Outline => self.outline_popup(),
-            PopupKind::Help => help_popup(&self.theme),
+            PopupKind::Help => help_popup(&self.theme, self.sidebar.is_some()),
         };
         self.popup = Some(popup);
     }
@@ -347,8 +544,8 @@ impl App {
     }
 }
 
-fn help_popup(theme: &Theme) -> Popup {
-    const KEYS: &[(&str, &str)] = &[
+fn help_popup(theme: &Theme, browsing: bool) -> Popup {
+    const READING: &[(&str, &str)] = &[
         ("j / ↓", "down one line"),
         ("k / ↑", "up one line"),
         ("d / u", "half page down / up"),
@@ -361,26 +558,60 @@ fn help_popup(theme: &Theme) -> Popup {
         ("", ""),
         ("t", "outline of headings"),
         ("l", "list of links"),
-        ("?", "this help"),
-        ("", ""),
-        ("↑ ↓ in a list", "move selection, previewing in place"),
+    ];
+
+    /// Shown only when there is a browser to drive; listing keys that do
+    /// nothing is worse than not listing them.
+    const FILES: &[(&str, &str)] = &[
+        ("Tab", "switch between the tree and the document"),
+        ("Ctrl-B", "show or hide the tree"),
+        ("j / k, ↓ / ↑", "move the selection, previewing as you go"),
+        ("l / h, → / ←", "expand / collapse a directory"),
+        ("Enter", "open the selection"),
+        ("/", "filter the tree by name"),
+        (".", "show or hide dotfiles"),
+    ];
+
+    const LISTS: &[(&str, &str)] = &[
+        ("↑ ↓", "move selection, previewing in place"),
         ("Enter", "jump to selection"),
         ("Esc", "cancel and return"),
         ("", ""),
+        ("?", "this help"),
         ("q", "quit"),
     ];
 
-    let rows = KEYS
-        .iter()
-        .map(|(key, description)| PopupRow {
-            lines: vec![Line::from(vec![
-                Span::styled(format!("  {key:<20}"), theme.popup_title),
-                Span::styled(description.to_string(), theme.text),
-            ])],
+    let mut rows = Vec::new();
+    let section = |title: &str, keys: &[(&str, &str)], rows: &mut Vec<PopupRow>| {
+        if !rows.is_empty() {
+            rows.push(blank_row());
+        }
+        rows.push(PopupRow {
+            lines: vec![Line::from(Span::styled(format!("  {title}"), theme.heading(2)))],
             target: 0,
-        })
-        .collect();
+        });
+        for (key, description) in keys {
+            rows.push(PopupRow {
+                lines: vec![Line::from(vec![
+                    Span::styled(format!("  {key:<20}"), theme.popup_title),
+                    Span::styled(description.to_string(), theme.text),
+                ])],
+                target: 0,
+            });
+        }
+    };
+
+    section("Reading", READING, &mut rows);
+    if browsing {
+        section("Files", FILES, &mut rows);
+    }
+    section("Lists", LISTS, &mut rows);
+
     Popup::new(PopupKind::Help, "Keys", rows)
+}
+
+fn blank_row() -> PopupRow {
+    PopupRow { lines: vec![Line::default()], target: 0 }
 }
 
 fn truncate(s: &str, width: usize) -> String {

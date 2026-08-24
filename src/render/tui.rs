@@ -11,10 +11,12 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 use ratatui::Frame;
 
+use crate::files::Tree;
 use crate::layout::wrap::text_width;
 use crate::layout::Theme;
-use crate::ui::app::{App, Mode};
+use crate::ui::app::{App, Focus, Mode};
 use crate::ui::popup::{self, PopupKind};
+use crate::ui::sidebar;
 
 /// Longest line we lay text out to, however wide the terminal is.
 ///
@@ -51,11 +53,18 @@ fn event_loop(
                 app.message = None;
                 handle_key(app, key);
             }
-            Event::Mouse(mouse) => match mouse.kind {
-                MouseEventKind::ScrollDown => app.scroll_by(3),
-                MouseEventKind::ScrollUp => app.scroll_by(-3),
-                _ => {}
-            },
+            Event::Mouse(mouse) => {
+                // Scroll whichever pane the pointer is over, which is the only
+                // reading of the gesture that does not surprise anyone.
+                let over_tree = app.browsing() && mouse.column < app.sidebar_columns;
+                match (mouse.kind, over_tree) {
+                    (MouseEventKind::ScrollDown, true) => app.tree_move(|t| t.step(3)),
+                    (MouseEventKind::ScrollUp, true) => app.tree_move(|t| t.step(-3)),
+                    (MouseEventKind::ScrollDown, false) => app.scroll_by(3),
+                    (MouseEventKind::ScrollUp, false) => app.scroll_by(-3),
+                    _ => {}
+                }
+            }
             // The next draw re-reads the area, so just let it fall through.
             Event::Resize(..) => {}
             _ => {}
@@ -78,10 +87,37 @@ fn draw(frame: &mut Frame, app: &mut App, max_width: Option<usize>) {
         return;
     }
 
-    app.relayout(content_width(area, max_width));
-
-    let body = Rect { height: area.height - 1, ..area };
+    let panes = Rect { height: area.height - 1, ..area };
     let bar = Rect { y: area.y + area.height - 1, height: 1, ..area };
+
+    // The browser gives up its columns rather than squeeze the document on a
+    // narrow terminal, so the split can come back refused.
+    let split = app.browsing().then(|| sidebar::split(panes, app.sidebar_width)).flatten();
+    let body = match split {
+        Some((tree_area, document)) => {
+            app.sidebar_columns = tree_area.width;
+            if let Some(tree) = app.sidebar.as_mut() {
+                tree.scroll_into_view(tree_area.height.saturating_sub(1) as usize);
+            }
+            let focused = app.focus == Focus::Tree;
+            sidebar::render(
+                app.sidebar.as_ref().unwrap(),
+                tree_area,
+                &app.theme,
+                focused,
+                frame.buffer_mut(),
+            );
+            document
+        }
+        None => {
+            app.sidebar_columns = 0;
+            panes
+        }
+    };
+
+    // Relayout uses the document pane's width, not the frame's: toggling the
+    // browser is a width change like any other, and re-anchors the same way.
+    app.relayout(content_width(body, max_width));
     app.viewport = body.height as usize;
     // Height changes can leave the scroll past the new end of the document.
     app.scroll_by(0);
@@ -130,11 +166,17 @@ fn draw_body(frame: &mut Frame, app: &App, area: Rect) {
 fn draw_bar(frame: &mut Frame, app: &App, area: Rect) {
     let theme = &app.theme;
 
-    // While typing, the bar becomes the query prompt.
-    if app.mode == Mode::SearchInput {
+    // While typing, the bar becomes the prompt.
+    if let Some(prompt) = match app.mode {
+        Mode::SearchInput => Some(("/", app.search.query.clone())),
+        Mode::FilterInput => {
+            Some(("filter ", app.sidebar.as_ref().map(|t| t.filter.clone()).unwrap_or_default()))
+        }
+        _ => None,
+    } {
         let spans = vec![
-            Span::styled("/", theme.status),
-            Span::styled(app.search.query.clone(), theme.status),
+            Span::styled(prompt.0, theme.status),
+            Span::styled(prompt.1, theme.status),
             Span::styled("▏", theme.status),
         ];
         render_bar(frame, area, spans, theme);
@@ -156,7 +198,10 @@ fn draw_bar(frame: &mut Frame, app: &App, area: Rect) {
         left.push_str(&format!(" │ {message} "));
     }
 
-    let right = format!(" {percent:>3}%  ?:help  q:quit ");
+    // The browser's key is worth advertising: it is the one thing on screen
+    // whose absence is not obvious once it is hidden.
+    let toggle = if app.sidebar.is_some() { "^B:files  " } else { "" };
+    let right = format!(" {percent:>3}%  {toggle}?:help  q:quit ");
     let gap = (area.width as usize).saturating_sub(text_width(&left) + text_width(&right));
 
     let spans = vec![
@@ -241,17 +286,86 @@ fn handle_key(app: &mut App, key: KeyEvent) {
 
     match app.mode {
         Mode::SearchInput => search_input_key(app, key),
+        Mode::FilterInput => filter_input_key(app, key),
         Mode::Popup => popup_key(app, key),
         Mode::Normal => normal_key(app, key),
     }
 }
 
-fn normal_key(app: &mut App, key: KeyEvent) {
+/// Keys that mean the same thing whichever pane has focus.
+///
+/// Handled before the per-pane tables so neither can shadow them; without this
+/// the browser would have to re-implement quitting and help to stay usable.
+fn shared_key(app: &mut App, key: KeyEvent) -> bool {
+    if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('b')) {
+        app.toggle_sidebar();
+        return true;
+    }
     match key.code {
         KeyCode::Char('q') => app.quit = true,
+        KeyCode::Char('?') => app.open_popup(PopupKind::Help),
+        KeyCode::Tab | KeyCode::BackTab => app.toggle_focus(),
+        _ => return false,
+    }
+    true
+}
+
+fn normal_key(app: &mut App, key: KeyEvent) {
+    if shared_key(app, key) {
+        return;
+    }
+    match app.focus {
+        Focus::Tree if app.browsing() => tree_key(app, key),
+        _ => content_key(app, key),
+    }
+}
+
+/// Keys for the file browser.
+///
+/// `h`/`l` expand and collapse here while `l` opens the link list in the
+/// document pane. Each pane owning its own letters is what keeps both tables
+/// short; the alternative is a second key for everything the browser adds.
+fn tree_key(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Char('j') | KeyCode::Down => app.tree_move(|t| t.step(1)),
+        KeyCode::Char('k') | KeyCode::Up => app.tree_move(|t| t.step(-1)),
+        KeyCode::Char('d') => app.tree_move(|t| t.step(8)),
+        KeyCode::Char('u') => app.tree_move(|t| t.step(-8)),
+        KeyCode::Char('f') | KeyCode::PageDown => app.tree_move(|t| t.step(16)),
+        KeyCode::Char('b') | KeyCode::PageUp => app.tree_move(|t| t.step(-16)),
+        KeyCode::Char('g') | KeyCode::Home => app.tree_move(Tree::to_top),
+        KeyCode::Char('G') | KeyCode::End => app.tree_move(Tree::to_bottom),
+
+        KeyCode::Char('l') | KeyCode::Right => app.tree_move(|t| {
+            t.expand();
+        }),
+        KeyCode::Char('h') | KeyCode::Left => app.tree_move(|t| {
+            t.collapse();
+        }),
+        KeyCode::Enter => app.open_selection(),
+
+        KeyCode::Char('.') => app.tree_move(Tree::toggle_hidden),
+        KeyCode::Char('/') => app.open_filter(),
+        KeyCode::Esc => {
+            if app.sidebar.as_ref().is_some_and(|t| !t.filter.is_empty()) {
+                app.tree_move(Tree::clear_filter);
+            } else {
+                app.quit = true;
+            }
+        }
+        _ => {}
+    }
+}
+
+fn content_key(app: &mut App, key: KeyEvent) {
+    match key.code {
         KeyCode::Esc => {
             if app.search.is_active() {
                 app.search.clear();
+            } else if app.browsing() {
+                // With a browser open, Escape steps back to it rather than
+                // quitting: leaving the application is what `q` is for.
+                app.focus = Focus::Tree;
             } else {
                 app.quit = true;
             }
@@ -272,7 +386,18 @@ fn normal_key(app: &mut App, key: KeyEvent) {
 
         KeyCode::Char('t') => app.open_popup(PopupKind::Outline),
         KeyCode::Char('l') => app.open_popup(PopupKind::Links),
-        KeyCode::Char('?') => app.open_popup(PopupKind::Help),
+        _ => {}
+    }
+}
+
+fn filter_input_key(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => app.filter_cancel(),
+        KeyCode::Enter => app.filter_commit(),
+        KeyCode::Backspace => app.filter_pop(),
+        KeyCode::Down => app.tree_move(|t| t.step(1)),
+        KeyCode::Up => app.tree_move(|t| t.step(-1)),
+        KeyCode::Char(c) if is_text(&key) => app.filter_push(c),
         _ => {}
     }
 }
@@ -286,9 +411,18 @@ fn search_input_key(app: &mut App, key: KeyEvent) {
         // refining the query after looking at a few hits.
         KeyCode::Down | KeyCode::Tab => app.popup_step(true),
         KeyCode::Up | KeyCode::BackTab => app.popup_step(false),
-        KeyCode::Char(c) => app.search_push(c),
+        KeyCode::Char(c) if is_text(&key) => app.search_push(c),
         _ => {}
     }
+}
+
+/// Whether a `Char` event is someone typing, rather than a chord.
+///
+/// A terminal reports Ctrl-J as `Char('j')` with a modifier set, so a prompt
+/// that matches on `Char` alone quietly types the letter when the reader meant
+/// a control key. Alt is excluded for the same reason.
+fn is_text(key: &KeyEvent) -> bool {
+    !key.modifiers.intersects(KeyModifiers::CONTROL.union(KeyModifiers::ALT))
 }
 
 fn popup_key(app: &mut App, key: KeyEvent) {

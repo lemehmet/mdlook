@@ -90,6 +90,20 @@ exactly where the screen says it is. Resizing re-runs only `layout` and restores
 position by nearest heading rather than raw line offset. `--plain`
 (`src/render/ansi.rs`) walks the same `RenderedDoc` and writes ANSI instead.
 
+Not every file is markdown, so `Content` (`src/content.rs`) sits in front of that
+pipeline: it classifies a file (`src/files/detect.rs`) and picks a producer —
+markdown, a numbered whole-file view (`src/layout/source.rs`), or a one-paragraph
+identification. All three produce a `RenderedDoc`, which is why the viewer, the
+search index and `--plain` needed no cases added for them. The file browser
+(`src/files/tree.rs`, `src/ui/sidebar.rs`) is a flat list of visible rows over a
+lazily-read tree; showing and hiding it is a width change, handled by the same
+re-anchoring as a resize.
+
+If you add a new kind of content, the bar to clear is the one every existing
+producer clears: `plain[i]` must be the text of `lines[i]`, no control character
+may survive into either, and the output must be a pure function of the input, the
+width and the theme.
+
 ## Pull requests
 
 1. Branch off `main`; do not push to `main` directly.

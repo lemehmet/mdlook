@@ -106,9 +106,26 @@ pub fn find(doc: &RenderedDoc, query: &str) -> Vec<Match> {
 
     let mut out = Vec::new();
     for (line, text) in doc.plain.iter().enumerate() {
-        find_in_line(text, &needle, sensitive, line, &mut out);
+        // Skip whatever the producer put in front of the content — the
+        // whole-file view's line-number gutter. Searching a source file for a
+        // number should find it in the code, not in the margin.
+        let from = content_start(text, doc.content_offset);
+        find_in_line(&text[from..], &needle, sensitive, line, from, &mut out);
     }
     out
+}
+
+/// `offset` clamped to a character boundary within `text`.
+///
+/// The gutter is ASCII and uniform, so this is the identity in practice. It is
+/// written defensively anyway because slicing on a bad index panics, and a
+/// producer that got its offset wrong should render oddly rather than crash.
+fn content_start(text: &str, offset: usize) -> usize {
+    let mut at = offset.min(text.len());
+    while at < text.len() && !text.is_char_boundary(at) {
+        at += 1;
+    }
+    at
 }
 
 /// Naive scan, which is the right call here: documents are small, the query
@@ -119,6 +136,9 @@ fn find_in_line(
     needle: &[char],
     sensitive: bool,
     line: usize,
+    // Byte offset of `haystack` within the full rendered line, so reported
+    // ranges stay valid against `plain[line]` rather than against the slice.
+    base: usize,
     out: &mut Vec<Match>,
 ) {
     // (byte offset, character) pairs, so a hit can be reported as a byte range.
@@ -136,9 +156,9 @@ fn find_in_line(
         });
 
         if hit {
-            let begin = chars[start].0;
+            let begin = base + chars[start].0;
             let last = chars[start + needle.len() - 1];
-            let end = last.0 + last.1.len_utf8();
+            let end = base + last.0 + last.1.len_utf8();
             out.push(Match { line, start: begin, end });
             // Non-overlapping: "aa" in "aaaa" is two hits, not three.
             start += needle.len();
