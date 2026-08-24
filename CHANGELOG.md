@@ -4,6 +4,25 @@ Notable changes, newest first. This project follows
 [semantic versioning](https://semver.org); while the major version is 0,
 breaking changes may land in a minor release.
 
+## v0.2.1 — 2026-08-24
+
+### Changed
+
+- Text now fills the pane it is drawn in instead of stopping at 100 columns.
+  The cap left a wide terminal mostly empty, and more so beside the file
+  browser, where the pane is already narrower than the frame. Width is
+  recomputed every frame, so resizing the window and hiding the browser both
+  re-flow. `--width N`, or `width = N` in the config, still sets a fixed
+  measure, and either is bounded by the pane so it cannot overflow it.
+- `--plain` to a terminal follows the terminal's width for the same reason.
+  Piped output is unchanged at 80 columns, since a pipe has no width to ask
+  about.
+
+### Deprecated
+
+- `render::tui::DEFAULT_MAX_WIDTH`. Nothing applies it any more; `--width` or
+  the config key says the same thing and says it where the reader can see it.
+
 ## v0.2.0 — 2026-08-24
 
 ### Files that are not markdown
