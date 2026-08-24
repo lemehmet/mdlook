@@ -92,7 +92,7 @@ jobs:
           path: dist/*.tar.gz*
 
   publish:
-    name: Publish
+    name: GitHub release
     needs: build
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
@@ -107,3 +107,96 @@ jobs:
         with:
           files: dist/*
           generate_release_notes: true
+
+  # Last, and deliberately so: this is the only step in the pipeline that cannot
+  # be undone. A crates.io version can be yanked, which hides it from new
+  # dependents, but it is never removed and the number is burned forever.
+  # Everything reversible — the three binaries, the GitHub release — has already
+  # succeeded by the time this runs, so a failure anywhere earlier costs nothing
+  # but a re-run.
+  crates-io:
+    name: crates.io
+    needs: publish
+    runs-on: ubuntu-latest
+    # `workflow_dispatch` is documented as a dry run. It must never reach here.
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Confirm the token is configured
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "::error::CARGO_REGISTRY_TOKEN is not set. Add it under" \
+                 "Settings ▸ Secrets and variables ▸ Actions. A token scoped to" \
+                 "publish-update for this crate is enough."
+            exit 1
+          fi
+
+      # The tag is what a human typed and the manifest is what actually gets
+      # uploaded. Tagging v0.3.0 with the manifest still at 0.2.0 would either
+      # fail confusingly or republish the wrong thing, so they are compared
+      # before anything is sent.
+      - name: Confirm the tag matches the manifest
+        id: version
+        run: |
+          manifest=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          if [ "${{ github.ref_name }}" != "v$manifest" ]; then
+            echo "::error::tag ${{ github.ref_name }} does not match Cargo.toml version $manifest"
+            exit 1
+          fi
+          echo "version=$manifest" >> "$GITHUB_OUTPUT"
+
+      # Re-running a release is a normal thing to do when a later step failed,
+      # and `cargo publish` treats an existing version as an error. Checking
+      # first turns that into a skip, so the workflow is safe to run twice.
+      - name: Check whether this version is already on crates.io
+        id: registry
+        run: |
+          # Index layout for a name of four or more characters: first two
+          # letters, next two, then the name.
+          #
+          # A failed fetch falls through to "not published" rather than failing
+          # the job: the index 404s for a crate that has never been released, and
+          # that must not be the thing that blocks a first release. `cargo` is
+          # the authority either way — it refuses a duplicate version itself, so
+          # the worst case here is a clearer error one step later.
+          index=$(curl -sS -H 'User-Agent: mdlook-release-workflow' \
+            https://index.crates.io/md/lo/mdlook || true)
+          published=$(printf '%s' "$index" \
+            | jq -r --arg v '${{ steps.version.outputs.version }}' \
+                'select(.vers == $v) | .vers' 2>/dev/null || true)
+          if [ -n "$published" ]; then
+            echo "::notice::mdlook $published is already published; skipping"
+            echo "already=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "already=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # `--locked` so the versions that ship are the ones the test suite ran
+      # against, rather than whatever resolves at this moment.
+      - name: Publish
+        if: steps.registry.outputs.already == 'false'
+        run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Confirm it is downloadable
+        if: steps.registry.outputs.already == 'false'
+        run: |
+          version='${{ steps.version.outputs.version }}'
+          # The index is what `cargo` reads, so it is what "published" means.
+          for _ in $(seq 1 20); do
+            if curl -sS -H 'User-Agent: mdlook-release-workflow' \
+                 https://index.crates.io/md/lo/mdlook \
+                 | jq -e --arg v "$version" 'select(.vers == $v)' > /dev/null; then
+              echo "mdlook $version is live on crates.io"
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "::error::mdlook $version did not appear in the index"
+          exit 1
