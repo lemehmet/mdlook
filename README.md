@@ -28,7 +28,7 @@ Linux x86-64 and arm64, macOS Apple Silicon. Each archive ships a SHA-256
 checksum:
 
 ```sh
-shasum -a 256 -c mdlook-v0.2.0-aarch64-apple-darwin.tar.gz.sha256
+shasum -a 256 -c mdlook-v0.2.1-aarch64-apple-darwin.tar.gz.sha256
 ```
 
 Building from source needs Rust 1.88 or newer and nothing else — no C toolchain,
@@ -153,7 +153,7 @@ it is over.
 
 ```
 -p, --plain          write ANSI to stdout instead of opening the viewer
--w, --width <N>      wrap width (default: terminal width, capped at 100)
+-w, --width <N>      wrap width (default: the width of the pane the text is in)
 -t, --theme <NAME>   dark, light, or mono
     --no-color       disable colour (NO_COLOR is also honoured)
     --browse         open the file browser (rooted here if no path is given)
@@ -162,9 +162,11 @@ it is over.
     --no-config      ignore the config file entirely
 ```
 
-Long lines are capped at 100 columns even on a wide terminal, because prose gets
-hard to track from the end of one line to the start of the next beyond that.
-Override with `--width`.
+Text fills the pane it is drawn in and re-flows whenever that changes — resizing
+the window, or showing and hiding the file browser. If you prefer a fixed
+measure, `--width 100` sets one for a single run and `width = 100` in the config
+sets it for good; either is capped by the pane, so a width wider than the
+terminal never overflows it.
 
 ## Config
 
@@ -176,7 +178,7 @@ Every key is optional and an empty file is valid:
 ```toml
 browse = false        # start with the file browser open
 theme  = "dark"       # dark, light, or mono
-width  = 100          # omit to follow the terminal
+width  = 100          # omit to fill whatever the pane is
 
 [browser]
 hidden        = false # list dotfiles
@@ -223,7 +225,7 @@ a width change like any other, and re-anchors the same way as a resize.
 ## Tests
 
 ```
-cargo test        # 181 tests
+cargo test        # 185 tests
 cargo clippy --all-targets
 ```
 

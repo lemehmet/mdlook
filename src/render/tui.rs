@@ -18,10 +18,21 @@ use crate::ui::app::{App, Focus, Mode};
 use crate::ui::popup::{self, PopupKind};
 use crate::ui::sidebar;
 
-/// Longest line we lay text out to, however wide the terminal is.
+/// Width used when there is no terminal to measure: a pipe, or a terminal that
+/// declines to report its size.
+pub const FALLBACK_WIDTH: usize = 80;
+
+/// The cap mdlook used to apply to every line, whatever the terminal was.
 ///
-/// Beyond roughly this, prose gets hard to track from the end of one line to the
-/// start of the next, so extra columns are left empty rather than used.
+/// It is no longer applied. Leaving columns empty on a wide terminal turned out
+/// to be the more annoying half of the trade, especially beside the file
+/// browser, where the pane is already narrower than the frame. Anyone who wants
+/// the old behaviour has a better tool for it than a hard-coded number: `--width
+/// 100`, or `width = 100` in the config, which applies the cap and says so.
+#[deprecated(
+    since = "0.2.1",
+    note = "text now uses the full width of its pane; pass --width or set width in the config to cap it"
+)]
 pub const DEFAULT_MAX_WIDTH: usize = 100;
 
 pub fn run(mut app: App, max_width: Option<usize>) -> Result<()> {
@@ -72,9 +83,22 @@ fn event_loop(
     }
 }
 
+/// How wide to lay the document out, for the pane it has been given.
+///
+/// The pane rather than the frame: with the browser open the document is not the
+/// whole terminal, and this is recomputed every frame, so resizing the window or
+/// hiding the browser both arrive here as an ordinary width change.
+///
+/// A cap applies only when the reader asked for one.
 fn content_width(area: Rect, max_width: Option<usize>) -> usize {
-    let cap = max_width.unwrap_or(DEFAULT_MAX_WIDTH);
-    (area.width as usize).min(cap).max(8)
+    let available = area.width as usize;
+    match max_width {
+        Some(cap) => available.min(cap),
+        None => available,
+    }
+    // Below this there is no useful layout to do, and the wrapper needs room to
+    // place a character at all.
+    .max(8)
 }
 
 // ---------------------------------------------------------------------------
@@ -459,4 +483,40 @@ fn preview(app: &mut App) {
 #[allow(dead_code)]
 fn cursor_style() -> Style {
     Style::new().add_modifier(Modifier::SLOW_BLINK)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn area(width: u16) -> Rect {
+        Rect { x: 0, y: 0, width, height: 24 }
+    }
+
+    #[test]
+    fn text_fills_the_pane_it_is_given() {
+        // The old behaviour capped this at 100 whatever the terminal was, which
+        // left a wide window mostly empty.
+        assert_eq!(content_width(area(200), None), 200);
+        assert_eq!(content_width(area(60), None), 60);
+    }
+
+    #[test]
+    fn an_explicit_width_still_caps() {
+        assert_eq!(content_width(area(200), Some(72)), 72);
+    }
+
+    #[test]
+    fn an_explicit_width_wider_than_the_pane_does_not_overflow_it() {
+        // `--width 200` on an 80-column terminal has to mean "at most 200", or
+        // every line runs off the right edge.
+        assert_eq!(content_width(area(80), Some(200)), 80);
+    }
+
+    #[test]
+    fn a_tiny_pane_still_gets_a_usable_width() {
+        for width in 0..8 {
+            assert_eq!(content_width(area(width), None), 8, "at {width} columns");
+        }
+    }
 }

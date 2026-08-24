@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use mdlook::config::{Overrides, Settings};
 use mdlook::files::Tree;
-use mdlook::render::tui::DEFAULT_MAX_WIDTH;
+use mdlook::render::tui::FALLBACK_WIDTH;
 use mdlook::ui::App;
 use mdlook::{parse, render, Config, Content, Theme, ThemeKind};
 
@@ -27,7 +27,7 @@ struct Args {
     #[arg(short, long)]
     plain: bool,
 
-    /// Wrap width. Defaults to the terminal width, capped at 100 columns.
+    /// Wrap width. Defaults to the width of the pane the text is drawn in.
     #[arg(short, long)]
     width: Option<usize>,
 
@@ -136,7 +136,10 @@ fn main() -> Result<()> {
     };
 
     if interactive {
-        let width = settings.width.unwrap_or(DEFAULT_MAX_WIDTH);
+        // A starting point only. The first frame measures the pane it actually
+        // got — which is narrower than the terminal when the browser is open —
+        // and lays out again if this guess was wrong.
+        let width = settings.width.unwrap_or_else(terminal_width);
         let mut app = App::new(content, title, theme, width);
         if browse {
             let (root, reveal) = browser_root(target.as_deref())?;
@@ -151,12 +154,13 @@ fn main() -> Result<()> {
 
     let width = settings.width.unwrap_or_else(|| {
         if std::io::stdout().is_terminal() {
-            crossterm::terminal::size()
-                .map(|(w, _)| w as usize)
-                .unwrap_or(80)
-                .clamp(20, DEFAULT_MAX_WIDTH)
+            // Narrower than this and the output is unreadable whatever we do, so
+            // it is worth overflowing a very small window rather than shredding
+            // every table in the document.
+            terminal_width().max(20)
         } else {
-            80
+            // A pipe has no width to ask about, and the far end may be a file.
+            FALLBACK_WIDTH
         }
     });
 
@@ -164,6 +168,11 @@ fn main() -> Result<()> {
     let mut out = std::io::stdout().lock();
     out.write_all(render::to_ansi(&rendered, color).as_bytes())?;
     Ok(())
+}
+
+/// The terminal's width, or [`FALLBACK_WIDTH`] if it will not say.
+fn terminal_width() -> usize {
+    crossterm::terminal::size().map(|(columns, _)| columns as usize).unwrap_or(FALLBACK_WIDTH)
 }
 
 /// Whether a bare invocation should browse the working directory instead of
