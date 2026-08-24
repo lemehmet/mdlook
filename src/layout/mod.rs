@@ -1,4 +1,5 @@
 pub mod code;
+pub mod source;
 pub mod table;
 pub mod theme;
 pub mod wrap;
@@ -39,6 +40,13 @@ pub struct RenderedDoc {
     pub anchors: Vec<Anchor>,
     pub links: Vec<LinkRef>,
     pub width: usize,
+    /// Byte offset at which the searchable content of every line begins.
+    ///
+    /// Zero for markdown. The whole-file viewer prefixes each line with a
+    /// fixed-width line-number gutter, and a search for `42` should find the
+    /// number in the code, not the row it sits on. The gutter is ASCII and the
+    /// same width on every line, so one offset describes them all.
+    pub content_offset: usize,
 }
 
 impl RenderedDoc {
@@ -81,6 +89,8 @@ struct Sink<'a> {
     skip_separator: bool,
     /// Nesting depth of the enclosing lists, for choosing the bullet glyph.
     list_depth: usize,
+    /// See [`RenderedDoc::content_offset`]. Only the whole-file view sets it.
+    content_offset: usize,
 }
 
 impl<'a> Sink<'a> {
@@ -94,6 +104,7 @@ impl<'a> Sink<'a> {
             links: Vec::new(),
             skip_separator: false,
             list_depth: 0,
+            content_offset: 0,
         }
     }
 
@@ -148,6 +159,7 @@ impl<'a> Sink<'a> {
             anchors: self.anchors,
             links: self.links,
             width: self.width,
+            content_offset: self.content_offset,
         }
     }
 
@@ -380,34 +392,12 @@ impl<'a> Sink<'a> {
         for line in highlighted {
             let mut spans = cells_to_spans(prefix);
             spans.push(Span::styled("  ", Style::new()));
-            let mut used = 2;
 
-            for span in line {
-                let w = text_width(&span.content);
-                // Long code lines are truncated rather than wrapped: re-wrapping
-                // code destroys the alignment that makes it readable, and the
-                // horizontal-scroll affordance is a better answer than a fake
-                // line break in the middle of an expression.
-                if used + w > avail {
-                    let room = avail.saturating_sub(used);
-                    if room > 0 {
-                        let cut: String = span
-                            .content
-                            .chars()
-                            .scan(0usize, |acc, c| {
-                                *acc += wrap::char_width(c);
-                                (*acc <= room).then_some(c)
-                            })
-                            .collect();
-                        let style = span.style;
-                        spans.push(Span::styled(cut, style));
-                    }
-                    used = avail;
-                    break;
-                }
-                used += w;
-                spans.push(span);
-            }
+            // Truncation, not wrapping — see `wrap::truncate`. The whole-file
+            // viewer cuts its lines the same way, through the same helper.
+            let fitted = wrap::truncate(line, avail.saturating_sub(2));
+            let used = 2 + fitted.iter().map(|s| text_width(&s.content)).sum::<usize>();
+            spans.extend(fitted);
 
             // Pad to the full width so the code background reads as a solid block.
             if let Some(color) = bg {
