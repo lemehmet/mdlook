@@ -12,17 +12,17 @@ use crate::layout::{wrap::text_width, RenderedDoc, Theme};
 use crate::ui::popup::{Popup, PopupKind, PopupRow};
 use crate::ui::search::Search;
 
-/// How long the browser's selection must rest on an image before it is
-/// decoded. Short enough to feel immediate on a deliberate stop, long enough
-/// that holding an arrow key through a directory of photographs decodes none
-/// of them.
-const IMAGE_DEBOUNCE: Duration = Duration::from_millis(200);
+/// How long the browser's selection must rest on an expensive file — an image
+/// to decode, a PDF to extract — before that work runs. Short enough to feel
+/// immediate on a deliberate stop, long enough that holding an arrow key
+/// through a directory of them pays for none.
+const PREVIEW_DEBOUNCE: Duration = Duration::from_millis(200);
 
-/// Decoded images kept for re-preview. Scrolling one file down and back is the
-/// most common browsing motion there is, and it should not pay the debounce
-/// and the decode twice. A handful is plenty; these are full-size pixel
-/// buffers.
-const IMAGE_CACHE: usize = 5;
+/// Resolved previews kept for revisits. Scrolling one file down and back is
+/// the most common browsing motion there is, and it should not pay the
+/// debounce and the decode twice. A handful is plenty; these hold full-size
+/// pixel buffers and whole extracted documents.
+const PREVIEW_CACHE: usize = 5;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
@@ -94,11 +94,11 @@ pub struct App {
     /// it fits itself to the pane — so only [`Content::wants_height`] content
     /// re-lays out when this goes stale.
     layout_height: Option<usize>,
-    /// An image waiting out its debounce: decode it when the clock passes the
+    /// A file waiting out its debounce: resolve it when the clock passes the
     /// deadline, unless the selection moves first and replaces this.
-    pending_image: Option<(PathBuf, Instant)>,
-    /// Recently decoded images, most recent last.
-    image_cache: Vec<(PathBuf, Content)>,
+    pending_preview: Option<(PathBuf, Instant)>,
+    /// Recently resolved previews, most recent last.
+    preview_cache: Vec<(PathBuf, Content)>,
 }
 
 impl App {
@@ -130,8 +130,8 @@ impl App {
             restore_filter: String::new(),
             image_options: ImageOptions::default(),
             layout_height: None,
-            pending_image: None,
-            image_cache: Vec::new(),
+            pending_preview: None,
+            preview_cache: Vec::new(),
         }
     }
 
@@ -206,18 +206,19 @@ impl App {
     }
 
     fn load(&mut self, path: &Path) {
-        // Whatever was waiting to decode, the selection has moved on.
-        self.pending_image = None;
+        // Whatever was waiting to resolve, the selection has moved on.
+        self.pending_preview = None;
         self.content = Content::preview(path, self.probe_command.as_deref(), self.image_options);
 
-        // An image comes back undecoded. A cached decode is shown at once;
-        // otherwise the placeholder stands and the event loop calls
-        // [`App::decode_pending`] once the selection has rested on it.
-        if matches!(self.content, Content::PendingImage { .. }) {
-            match self.cached_image(path) {
-                Some(image) => self.content = image,
+        // Expensive files come back as placeholders. A cached resolution is
+        // shown at once; otherwise the placeholder stands and the event loop
+        // calls [`App::resolve_pending_preview`] once the selection has rested.
+        if matches!(self.content, Content::PendingImage { .. } | Content::PendingPdf { .. }) {
+            match self.cached_preview(path) {
+                Some(content) => self.content = content,
                 None => {
-                    self.pending_image = Some((path.to_path_buf(), Instant::now() + IMAGE_DEBOUNCE))
+                    self.pending_preview =
+                        Some((path.to_path_buf(), Instant::now() + PREVIEW_DEBOUNCE))
                 }
             }
         }
@@ -243,30 +244,31 @@ impl App {
         self.layout_height = height;
     }
 
-    // -- images ------------------------------------------------------------
+    // -- deferred previews: images and PDFs ---------------------------------
 
-    /// When the event loop should wake up to decode, if anything is waiting.
-    pub fn pending_image_deadline(&self) -> Option<Instant> {
-        self.pending_image.as_ref().map(|(_, deadline)| *deadline)
+    /// When the event loop should wake up to resolve, if anything is waiting.
+    pub fn pending_preview_deadline(&self) -> Option<Instant> {
+        self.pending_preview.as_ref().map(|(_, deadline)| *deadline)
     }
 
-    /// Decode the image whose debounce has expired, if it has.
+    /// Run the expensive read whose debounce has expired, if it has.
     ///
     /// Called by the event loop when its wait timed out rather than producing
     /// an event: no event is exactly the signal that the reader has stopped
     /// moving, which is what the debounce was waiting to know.
-    pub fn decode_pending_image(&mut self) {
-        let Some((path, deadline)) = self.pending_image.clone() else { return };
+    pub fn resolve_pending_preview(&mut self) {
+        let Some((path, deadline)) = self.pending_preview.clone() else { return };
         if Instant::now() < deadline {
             return;
         }
-        self.pending_image = None;
+        self.pending_preview = None;
 
-        let content = Content::decode_image(&path, self.image_options);
-        self.cache_image(path.clone(), content.clone());
+        let content =
+            Content::preview_resolved(&path, self.probe_command.as_deref(), self.image_options);
+        self.cache_preview(path.clone(), content.clone());
 
-        // The decode only ever starts after the selection has rested on the
-        // file, but check anyway: a stale swap would put the wrong picture
+        // The resolve only ever starts after the selection has rested on the
+        // file, but check anyway: a stale swap would put the wrong content
         // under the current title.
         if self.previewed.as_deref() == Some(path.as_path()) {
             self.content = content;
@@ -277,24 +279,25 @@ impl App {
         }
     }
 
-    /// A cached decode for this path, restamped with the current block mode.
-    fn cached_image(&mut self, path: &Path) -> Option<Content> {
-        let index = self.image_cache.iter().position(|(p, _)| p == path)?;
+    /// A cached resolution for this path; an image is restamped with the
+    /// current block mode.
+    fn cached_preview(&mut self, path: &Path) -> Option<Content> {
+        let index = self.preview_cache.iter().position(|(p, _)| p == path)?;
         // Move it to the back: recently shown is the last thing to evict.
-        let entry = self.image_cache.remove(index);
-        self.image_cache.push(entry);
-        let mut content = self.image_cache.last().map(|(_, c)| c.clone())?;
+        let entry = self.preview_cache.remove(index);
+        self.preview_cache.push(entry);
+        let mut content = self.preview_cache.last().map(|(_, c)| c.clone())?;
         if let Content::Image { mode, .. } = &mut content {
             *mode = self.image_options.mode;
         }
         Some(content)
     }
 
-    fn cache_image(&mut self, path: PathBuf, content: Content) {
-        self.image_cache.retain(|(p, _)| p != &path);
-        self.image_cache.push((path, content));
-        if self.image_cache.len() > IMAGE_CACHE {
-            self.image_cache.remove(0);
+    fn cache_preview(&mut self, path: PathBuf, content: Content) {
+        self.preview_cache.retain(|(p, _)| p != &path);
+        self.preview_cache.push((path, content));
+        if self.preview_cache.len() > PREVIEW_CACHE {
+            self.preview_cache.remove(0);
         }
     }
 

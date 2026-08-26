@@ -59,11 +59,11 @@ fn event_loop(
             return Ok(());
         }
 
-        // Normally this blocks on the next event. With an image waiting out
-        // its debounce the wait gets a deadline instead, and *timing out* is
+        // Normally this blocks on the next event. With an image or a PDF
+        // waiting out its debounce the wait gets a deadline instead, and *timing out* is
         // the interesting outcome: no event for that long means the reader
-        // has stopped on the file, which is the moment to pay for the decode.
-        let event = match app.pending_image_deadline() {
+        // has stopped on the file, which is the moment to pay for the decode or extraction.
+        let event = match app.pending_preview_deadline() {
             Some(deadline) => {
                 let timeout = deadline.saturating_duration_since(std::time::Instant::now());
                 match event::poll(timeout)? {
@@ -75,7 +75,7 @@ fn event_loop(
         };
 
         let Some(event) = event else {
-            app.decode_pending_image();
+            app.resolve_pending_preview();
             continue;
         };
 

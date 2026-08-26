@@ -166,6 +166,12 @@ pub fn supported_image(head: &[u8]) -> Option<&'static str> {
     None
 }
 
+/// Whether these bytes are a PDF, which the viewer extracts text from rather
+/// than merely names.
+pub fn is_pdf(head: &[u8]) -> bool {
+    head.starts_with(b"%PDF-")
+}
+
 /// Identify a binary file from the head of its contents.
 ///
 /// Returns something you could act on — the format, and for executables the

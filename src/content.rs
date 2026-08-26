@@ -37,6 +37,13 @@ pub const MAX_TEXT_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_IMAGE_PIXELS: u64 = 64_000_000;
 
+/// Largest PDF handed to the text extractor.
+///
+/// Extraction walks every page, so this bounds a cursor-move's worst case the
+/// same way [`MAX_IMAGE_BYTES`] does for a decode. Most PDFs past this size are
+/// scans, which have no text to extract anyway.
+pub const MAX_PDF_BYTES: u64 = 32 * 1024 * 1024;
+
 /// How images should be handled, resolved from the config and command line.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ImageOptions {
@@ -96,6 +103,13 @@ pub enum Content {
         format: String,
         size: u64,
     },
+    /// A PDF whose text has not been extracted yet — the same bargain as
+    /// [`Content::PendingImage`], because walking a document's pages on a
+    /// cursor move costs the same kind of time a decode does.
+    PendingPdf {
+        name: String,
+        size: u64,
+    },
 }
 
 impl From<Document> for Content {
@@ -130,6 +144,10 @@ impl Content {
             Content::PendingImage { name, format, size } => {
                 let headline = format!("{format}  ·  {}", detect::human_size(*size));
                 source::summary(name, &headline, "rendering…", width, theme)
+            }
+            Content::PendingPdf { name, size } => {
+                let headline = format!("PDF document  ·  {}", detect::human_size(*size));
+                source::summary(name, &headline, "extracting text…", width, theme)
             }
         }
     }
@@ -189,14 +207,15 @@ impl Content {
         Self::read_inner(path, probe, images, false)
     }
 
-    /// `defer_images` is the browser's variant of the same read: an image comes
-    /// back as [`Content::PendingImage`] instead of being decoded, so the
-    /// cursor can pass over a hundred photographs without paying for one.
+    /// `defer` is the browser's variant of the same read: anything expensive to
+    /// open — an image to decode, a PDF to extract — comes back as its
+    /// `Pending*` placeholder instead, so the cursor can pass over a hundred
+    /// such files without paying for one.
     fn read_inner(
         path: &Path,
         probe: Option<&str>,
         images: ImageOptions,
-        defer_images: bool,
+        defer: bool,
     ) -> Result<Self> {
         let name = path.to_string_lossy().into_owned();
         let metadata = std::fs::metadata(path).with_context(|| format!("reading {name}"))?;
@@ -212,10 +231,24 @@ impl Content {
             .read_to_end(&mut head)
             .with_context(|| format!("reading {name}"))?;
 
+        // Before the text/binary split, because it belongs to neither side: a
+        // PDF is usually full of compressed streams, but an all-ASCII one is
+        // legal and would otherwise pass the UTF-8 test and be shown as its
+        // own raw source. The magic number outranks what the bytes decode as.
+        // Ungated, unlike images: extraction produces text, which is what this
+        // viewer is for, and the debounce already bounds its cost.
+        if detect::is_pdf(&head) {
+            return Ok(if defer {
+                Content::PendingPdf { name, size: metadata.len() }
+            } else {
+                Self::extract_pdf(path)
+            });
+        }
+
         if detect::kind(&name, &head) == Kind::Binary {
             if images.enabled {
                 if let Some(format) = detect::supported_image(&head) {
-                    return Ok(if defer_images {
+                    return Ok(if defer {
                         Content::PendingImage {
                             name,
                             format: format.to_string(),
@@ -259,9 +292,9 @@ impl Content {
     /// character device blocks the process forever, and here the "open" happens
     /// on every press of the down arrow.
     ///
-    /// Images are identified but not decoded: they come back as
-    /// [`Content::PendingImage`], and the viewer decides when the decode is
-    /// worth running. See [`Content::decode_image`].
+    /// Anything expensive to open is identified but not opened: it comes back
+    /// as a `Pending*` placeholder, and the viewer decides when the real work
+    /// is worth running. See [`Content::preview_resolved`].
     pub fn preview(path: &Path, probe: Option<&str>, images: ImageOptions) -> Self {
         let name = path.to_string_lossy().into_owned();
 
@@ -285,13 +318,27 @@ impl Content {
         }
     }
 
+    /// The preview's second half: the full-cost read that [`Content::preview`]
+    /// deferred, run once the selection has rested on the file.
+    ///
+    /// This re-reads and re-sniffs rather than trusting what the placeholder
+    /// said the file was: the debounce is a window, and a file can change under
+    /// it. Whatever the file is *now* is what gets shown.
+    pub fn preview_resolved(path: &Path, probe: Option<&str>, images: ImageOptions) -> Self {
+        let name = path.to_string_lossy().into_owned();
+        match Self::read_inner(path, probe, images, false) {
+            Ok(content) => content,
+            Err(error) => Self::note(&name, "cannot be read", &root_cause(&error)),
+        }
+    }
+
     /// Decode an image file into [`Content::Image`], whatever it takes.
     ///
     /// Never fails, for the same reason [`Content::preview`] never fails: this
     /// runs while a browser is open, and every way a file can disappoint —
     /// vanished since it was listed, too large, corrupt past its magic number —
     /// has to land as something the pane can show.
-    pub fn decode_image(path: &Path, options: ImageOptions) -> Self {
+    fn decode_image(path: &Path, options: ImageOptions) -> Self {
         let name = path.to_string_lossy().into_owned();
 
         let metadata = match std::fs::metadata(path) {
@@ -358,6 +405,51 @@ impl Content {
             name: name.to_string(),
             headline: format!("binary file  ·  {}", detect::human_size(size)),
             detail: format!("{format}  ·  does not decode: {error}"),
+        }
+    }
+
+    /// Extract a PDF's text, whatever it takes. Same never-fail contract as
+    /// [`Content::decode_image`], for the same reason.
+    ///
+    /// The result goes through the whole-file text view: no layout is
+    /// reconstructed, which is the deal — the text is enough to read, search
+    /// and grep-by-eye, and anything more belongs in a PDF viewer.
+    fn extract_pdf(path: &Path) -> Self {
+        let name = path.to_string_lossy().into_owned();
+
+        let metadata = match std::fs::metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) => return Self::note(&name, "cannot be read", &error.to_string()),
+        };
+        let headline = format!("PDF document  ·  {}", detect::human_size(metadata.len()));
+        if metadata.len() > MAX_PDF_BYTES {
+            return Self::note(&name, &headline, "too large to extract text from");
+        }
+
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) => return Self::note(&name, "cannot be read", &error.to_string()),
+        };
+
+        // The extractor is a parser for a hostile format, and its history says
+        // some inputs panic it. A panic on a cursor move must not take the
+        // browser down, so it is caught — and the default panic hook is
+        // silenced for the call, because its stderr message would be drawn
+        // straight onto the alternate screen.
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let extracted = std::panic::catch_unwind(|| pdf_extract::extract_text_from_mem(&bytes));
+        std::panic::set_hook(hook);
+
+        match extracted {
+            Ok(Ok(text)) if text.trim().is_empty() => {
+                Self::note(&name, &headline, "no extractable text — likely a scanned document")
+            }
+            Ok(Ok(text)) => Content::Text { name, body: text },
+            Ok(Err(error)) => {
+                Self::note(&name, &headline, &format!("text extraction failed: {error}"))
+            }
+            Err(_) => Self::note(&name, &headline, "text extraction failed"),
         }
     }
 }
@@ -471,7 +563,7 @@ mod tests {
             "preview defers: {preview:?}"
         );
 
-        let decoded = Content::decode_image(&path, ImageOptions::default());
+        let decoded = Content::preview_resolved(&path, None, ImageOptions::default());
         let doc = decoded.layout(40, &Theme::default());
         assert!(doc.status.is_some(), "an image reports its rendering to the status bar");
     }
@@ -496,9 +588,83 @@ mod tests {
         // decodes as nothing.
         std::fs::write(&path, b"\x89PNG\r\n\x1a\n not actually a png").unwrap();
 
-        let content = Content::decode_image(&path, ImageOptions::default());
+        let content = Content::preview_resolved(&path, None, ImageOptions::default());
         assert!(matches!(content, Content::Summary { .. }), "{content:?}");
         let text = content.layout(80, &Theme::default()).plain.join("\n");
         assert!(text.contains("does not decode"), "{text}");
+    }
+
+    // -- PDFs ----------------------------------------------------------------
+
+    /// A minimal but valid one-page PDF that says `text` in Helvetica, with a
+    /// correct xref table — built by hand so the test depends on no fixture
+    /// file and no external tool.
+    fn tiny_pdf(text: &str) -> Vec<u8> {
+        let stream = format!("BT /F1 24 Tf 72 720 Td ({text}) Tj ET");
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
+                /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>"
+                .to_string(),
+            format!("<< /Length {} >>\nstream\n{stream}\nendstream", stream.len()),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+        ];
+
+        let mut out = String::from("%PDF-1.4\n");
+        let mut offsets = Vec::new();
+        for (index, body) in objects.iter().enumerate() {
+            offsets.push(out.len());
+            out.push_str(&format!("{} 0 obj\n{body}\nendobj\n", index + 1));
+        }
+        let xref_at = out.len();
+        out.push_str(&format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1));
+        for offset in offsets {
+            out.push_str(&format!("{offset:010} 00000 n \n"));
+        }
+        out.push_str(&format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_at}\n%%EOF\n",
+            objects.len() + 1
+        ));
+        out.into_bytes()
+    }
+
+    fn pdf_file(name: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join("mdlook-test-pdfs");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn reading_a_pdf_extracts_its_text_and_previewing_defers_it() {
+        let path = pdf_file("hello.pdf", &tiny_pdf("Hello mdlook"));
+
+        let preview = Content::preview(&path, None, ImageOptions::default());
+        assert!(matches!(preview, Content::PendingPdf { .. }), "preview defers: {preview:?}");
+
+        let read = Content::read(&path, None, ImageOptions::default()).unwrap();
+        assert!(matches!(read, Content::Text { .. }), "read extracts: {read:?}");
+        let text = read.layout(80, &Theme::default()).plain.join("\n");
+        assert!(text.contains("Hello mdlook"), "{text}");
+    }
+
+    #[test]
+    fn a_pdf_that_does_not_parse_is_a_note_not_a_crash() {
+        let path = pdf_file("broken.pdf", b"%PDF-1.4\nthis is not a real pdf at all");
+        let content = Content::preview_resolved(&path, None, ImageOptions::default());
+        assert!(matches!(content, Content::Summary { .. }), "{content:?}");
+        let text = content.layout(80, &Theme::default()).plain.join("\n");
+        assert!(text.contains("PDF document"), "{text}");
+    }
+
+    #[test]
+    fn a_pdf_with_no_text_says_it_is_probably_scanned() {
+        // Structurally valid, but its only content stream draws nothing.
+        let path = pdf_file("empty.pdf", &tiny_pdf(""));
+        let content = Content::preview_resolved(&path, None, ImageOptions::default());
+        let text = content.layout(80, &Theme::default()).plain.join("\n");
+        assert!(text.contains("no extractable text"), "{text}");
     }
 }
