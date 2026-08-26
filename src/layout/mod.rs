@@ -1,4 +1,6 @@
+pub mod blocks;
 pub mod code;
+pub mod picture;
 pub mod source;
 pub mod table;
 pub mod theme;
@@ -47,6 +49,11 @@ pub struct RenderedDoc {
     /// number in the code, not the row it sits on. The gutter is ASCII and the
     /// same width on every line, so one offset describes them all.
     pub content_offset: usize,
+    /// A line about the rendering itself for the status bar, when the producer
+    /// has one worth showing. Only the image view sets it — which block mode
+    /// drew the picture and at what effective resolution — because only there
+    /// is the answer invisible in the content itself.
+    pub status: Option<String>,
 }
 
 impl RenderedDoc {
@@ -160,6 +167,7 @@ impl<'a> Sink<'a> {
             links: self.links,
             width: self.width,
             content_offset: self.content_offset,
+            status: None,
         }
     }
 

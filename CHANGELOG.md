@@ -4,6 +4,30 @@ Notable changes, newest first. This project follows
 [semantic versioning](https://semver.org); while the major version is 0,
 breaking changes may land in a minor release.
 
+## v0.3.0 — 2026-08-26
+
+### Images render as coloured blocks
+
+- A PNG, JPEG, GIF or WebP now draws in the pane as block characters — enough
+  shape and colour to know what the image is without leaving the terminal —
+  instead of being identified as a binary. Works everywhere mdlook works, in
+  any terminal, and `--plain` writes the same picture to a pipe.
+- `m` cycles the subpixel grid: half → quadrant → sextant → octant. Half-blocks
+  are the lossless default; the finer grids sharpen edges at the cost of colour
+  smoothness and need a font that ships the glyphs (sextants are Unicode 13,
+  octants Unicode 16), which no terminal reports — the cycle key is the
+  capability test, and the status bar names the mode and effective resolution.
+- Every mode draws the image the same size on screen; the finer grids spend
+  their extra subpixels on detail. Nothing is upscaled past the file's own
+  resolution, and the picture fits the pane, both dimensions.
+- In the browser, an image decodes only after the selection has rested on it
+  for a moment, so holding an arrow key through a directory of photographs
+  costs nothing; the last few decodes are cached. Decoding is bounded by file
+  size and by pixel count read from the header before anything is allocated.
+- `--no-images`, or `enabled = false` under `[images]` in the config, keeps
+  images as identified binaries. `block_mode` sets the starting grid. The mono
+  theme never renders images, because `NO_COLOR` means no colour.
+
 ## v0.2.1 — 2026-08-24
 
 ### Changed

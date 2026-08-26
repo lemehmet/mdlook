@@ -12,11 +12,14 @@
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use image::RgbaImage;
 
 use crate::doc::Document;
 use crate::files::detect::{self, Kind};
+use crate::layout::picture::{self, BlockMode};
 use crate::layout::{self, source, RenderedDoc, Theme};
 
 /// Largest file shown as text.
@@ -25,6 +28,29 @@ use crate::layout::{self, source, RenderedDoc, Theme};
 /// single arrow key. A file this size is a database or a dump, not something
 /// anyone reads in a pager, so it gets described instead.
 pub const MAX_TEXT_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Largest file the image decoder is pointed at, and the most pixels it is
+/// asked to hold. Both bounds answer the same question — how much work is a
+/// preview allowed to cost? — from the two directions a file can be expensive:
+/// bytes to read, and pixels to allocate. A file past either is described like
+/// any other binary rather than decoded.
+pub const MAX_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_IMAGE_PIXELS: u64 = 64_000_000;
+
+/// How images should be handled, resolved from the config and command line.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ImageOptions {
+    /// Off means an image file is identified like any other binary. The escape
+    /// hatch for directories that are mostly photographs.
+    pub enabled: bool,
+    pub mode: BlockMode,
+}
+
+impl Default for ImageOptions {
+    fn default() -> Self {
+        Self { enabled: true, mode: BlockMode::default() }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub enum Content {
@@ -45,6 +71,31 @@ pub enum Content {
         headline: String,
         detail: String,
     },
+    /// A decoded image, drawn as coloured block characters.
+    ///
+    /// The pixels sit behind an `Arc` because `Content` is cloned freely — the
+    /// browser's preview cache holds recent ones — and a photograph is the one
+    /// variant whose payload is too large to copy casually.
+    Image {
+        name: String,
+        /// e.g. `"PNG image"`, from the signature table.
+        format: String,
+        /// File size on disk, for the info line.
+        size: u64,
+        pixels: Arc<RgbaImage>,
+        mode: BlockMode,
+    },
+    /// An image the browser has identified but deliberately not decoded yet.
+    ///
+    /// This is what makes holding an arrow key through a directory of
+    /// photographs painless: the pane shows this immediately, and the decode
+    /// runs only once the selection has rested on the file — the debounce lives
+    /// in the event loop, which swaps this for [`Content::Image`].
+    PendingImage {
+        name: String,
+        format: String,
+        size: u64,
+    },
 }
 
 impl From<Document> for Content {
@@ -56,13 +107,37 @@ impl From<Document> for Content {
 impl Content {
     /// Lay out at a given width. Pure, exactly like [`layout::layout`].
     pub fn layout(&self, width: usize, theme: &Theme) -> RenderedDoc {
+        self.layout_sized(width, None, theme)
+    }
+
+    /// Lay out for a pane of a known height. Still pure — the height is just
+    /// one more argument.
+    ///
+    /// Only an image uses it, to fit the drawing to the pane instead of only
+    /// to its width; every text variant lays out the same however tall the
+    /// pane is, which is why [`Content::layout`] exists without it.
+    pub fn layout_sized(&self, width: usize, height: Option<usize>, theme: &Theme) -> RenderedDoc {
         match self {
             Content::Markdown(document) => layout::layout(document, width, theme),
             Content::Text { name, body } => source::source(name, body, width, theme),
             Content::Summary { name, headline, detail } => {
                 source::summary(name, headline, detail, width, theme)
             }
+            Content::Image { name, format, size, pixels, mode } => {
+                let caption = picture::Caption { name, format, size: *size };
+                picture::picture(caption, pixels, *mode, width, height, theme)
+            }
+            Content::PendingImage { name, format, size } => {
+                let headline = format!("{format}  ·  {}", detect::human_size(*size));
+                source::summary(name, &headline, "rendering…", width, theme)
+            }
         }
+    }
+
+    /// Whether layout depends on the pane's height, so the viewer knows a
+    /// height change alone requires laying out again.
+    pub fn wants_height(&self) -> bool {
+        matches!(self, Content::Image { .. })
     }
 
     /// Classify and wrap bytes already in hand.
@@ -106,7 +181,23 @@ impl Content {
     /// reading: identifying a binary needs its first few hundred bytes, so
     /// there is no reason to pull a gigabyte disk image through memory to
     /// print one line about it.
-    pub fn read(path: &Path, probe: Option<&str>) -> Result<Self> {
+    ///
+    /// An image this build can decode is decoded here, unless images are off,
+    /// in which case it stays a described binary like before the viewer knew
+    /// how.
+    pub fn read(path: &Path, probe: Option<&str>, images: ImageOptions) -> Result<Self> {
+        Self::read_inner(path, probe, images, false)
+    }
+
+    /// `defer_images` is the browser's variant of the same read: an image comes
+    /// back as [`Content::PendingImage`] instead of being decoded, so the
+    /// cursor can pass over a hundred photographs without paying for one.
+    fn read_inner(
+        path: &Path,
+        probe: Option<&str>,
+        images: ImageOptions,
+        defer_images: bool,
+    ) -> Result<Self> {
         let name = path.to_string_lossy().into_owned();
         let metadata = std::fs::metadata(path).with_context(|| format!("reading {name}"))?;
 
@@ -122,6 +213,19 @@ impl Content {
             .with_context(|| format!("reading {name}"))?;
 
         if detect::kind(&name, &head) == Kind::Binary {
+            if images.enabled {
+                if let Some(format) = detect::supported_image(&head) {
+                    return Ok(if defer_images {
+                        Content::PendingImage {
+                            name,
+                            format: format.to_string(),
+                            size: metadata.len(),
+                        }
+                    } else {
+                        Self::decode_image(path, images)
+                    });
+                }
+            }
             // The external identifier, when one is configured, otherwise the
             // built-in table. Falling back rather than reporting the failure
             // keeps a missing `file(1)` from turning into an error message
@@ -154,7 +258,11 @@ impl Content {
     /// Only regular files are opened. That is not tidiness — opening a FIFO or a
     /// character device blocks the process forever, and here the "open" happens
     /// on every press of the down arrow.
-    pub fn preview(path: &Path, probe: Option<&str>) -> Self {
+    ///
+    /// Images are identified but not decoded: they come back as
+    /// [`Content::PendingImage`], and the viewer decides when the decode is
+    /// worth running. See [`Content::decode_image`].
+    pub fn preview(path: &Path, probe: Option<&str>, images: ImageOptions) -> Self {
         let name = path.to_string_lossy().into_owned();
 
         let metadata = match std::fs::metadata(path) {
@@ -171,9 +279,85 @@ impl Content {
             return Self::note(&name, "not a regular file", "nothing to display");
         }
 
-        match Self::read(path, probe) {
+        match Self::read_inner(path, probe, images, true) {
             Ok(content) => content,
             Err(error) => Self::note(&name, "cannot be read", &root_cause(&error)),
+        }
+    }
+
+    /// Decode an image file into [`Content::Image`], whatever it takes.
+    ///
+    /// Never fails, for the same reason [`Content::preview`] never fails: this
+    /// runs while a browser is open, and every way a file can disappoint —
+    /// vanished since it was listed, too large, corrupt past its magic number —
+    /// has to land as something the pane can show.
+    pub fn decode_image(path: &Path, options: ImageOptions) -> Self {
+        let name = path.to_string_lossy().into_owned();
+
+        let metadata = match std::fs::metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) => return Self::note(&name, "cannot be read", &error.to_string()),
+        };
+        if metadata.len() > MAX_IMAGE_BYTES {
+            return Self::note(
+                &name,
+                &format!("image  ·  {}", detect::human_size(metadata.len())),
+                "too large to render",
+            );
+        }
+
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) => return Self::note(&name, "cannot be read", &error.to_string()),
+        };
+        let format = detect::supported_image(&bytes).unwrap_or("image").to_string();
+        let size = bytes.len() as u64;
+
+        let cursor = || std::io::Cursor::new(&bytes);
+        // Dimensions come from the header alone, so an absurd pixel count is
+        // refused before the allocation it names, not after.
+        let dimensions = image::ImageReader::new(cursor())
+            .with_guessed_format()
+            .map_err(anyhow::Error::from)
+            .and_then(|r| r.into_dimensions().map_err(anyhow::Error::from));
+        match dimensions {
+            Ok((w, h)) if u64::from(w) * u64::from(h) > MAX_IMAGE_PIXELS => {
+                return Self::note(
+                    &name,
+                    &format!("{format}  ·  {w}×{h}  ·  {}", detect::human_size(size)),
+                    "too large to render",
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                return Self::binary_with_detail(&name, size, &format, &error.to_string())
+            }
+        }
+
+        let decoded = image::ImageReader::new(cursor())
+            .with_guessed_format()
+            .map_err(anyhow::Error::from)
+            .and_then(|r| r.decode().map_err(anyhow::Error::from));
+        match decoded {
+            Ok(image) => Content::Image {
+                name,
+                format,
+                size,
+                pixels: Arc::new(image.to_rgba8()),
+                mode: options.mode,
+            },
+            // Identified as an image but not decodable as one: a truncated
+            // download, a novel encoding. Fall back to describing it, keeping
+            // the reason on the page rather than in a log nobody sees.
+            Err(error) => Self::binary_with_detail(&name, size, &format, &error.to_string()),
+        }
+    }
+
+    fn binary_with_detail(name: &str, size: u64, format: &str, error: &str) -> Self {
+        Content::Summary {
+            name: name.to_string(),
+            headline: format!("binary file  ·  {}", detect::human_size(size)),
+            detail: format!("{format}  ·  does not decode: {error}"),
         }
     }
 }
@@ -237,7 +421,8 @@ mod tests {
 
     #[test]
     fn reading_a_missing_file_names_it_in_the_error() {
-        let error = Content::read(Path::new("/nonexistent/nope.md"), None).unwrap_err();
+        let error = Content::read(Path::new("/nonexistent/nope.md"), None, ImageOptions::default())
+            .unwrap_err();
         assert!(format!("{error}").contains("nope.md"));
     }
 
@@ -245,7 +430,7 @@ mod tests {
     fn previewing_never_fails_however_bad_the_path() {
         // Whatever is wrong, the browser has to keep running.
         for path in ["/nonexistent/nope.md", "/", "/proc/self/mem", "/dev/null"] {
-            let content = Content::preview(Path::new(path), None);
+            let content = Content::preview(Path::new(path), None, ImageOptions::default());
             let doc = content.layout(60, &Theme::default());
             assert!(!doc.is_empty(), "{path} rendered nothing");
         }
@@ -253,7 +438,67 @@ mod tests {
 
     #[test]
     fn a_directory_is_a_note_in_the_preview_but_an_error_when_named() {
-        assert!(matches!(Content::preview(Path::new("/"), None), Content::Summary { .. }));
-        assert!(Content::read(Path::new("/"), None).is_err());
+        assert!(matches!(
+            Content::preview(Path::new("/"), None, ImageOptions::default()),
+            Content::Summary { .. }
+        ));
+        assert!(Content::read(Path::new("/"), None, ImageOptions::default()).is_err());
+    }
+
+    // -- images --------------------------------------------------------------
+
+    /// A real 1×1 red PNG under a name this test alone writes — tests run in
+    /// parallel, so a shared file would be a race.
+    fn png_file(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join("mdlook-test-images");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        let image = image::RgbaImage::from_pixel(1, 1, image::Rgba([255, 0, 0, 255]));
+        image.save(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn reading_an_image_decodes_it_and_previewing_defers_it() {
+        let path = png_file("read-vs-preview.png");
+
+        let read = Content::read(&path, None, ImageOptions::default()).unwrap();
+        assert!(matches!(read, Content::Image { .. }), "read decodes: {read:?}");
+
+        let preview = Content::preview(&path, None, ImageOptions::default());
+        assert!(
+            matches!(preview, Content::PendingImage { ref format, .. } if format == "PNG image"),
+            "preview defers: {preview:?}"
+        );
+
+        let decoded = Content::decode_image(&path, ImageOptions::default());
+        let doc = decoded.layout(40, &Theme::default());
+        assert!(doc.status.is_some(), "an image reports its rendering to the status bar");
+    }
+
+    #[test]
+    fn with_images_off_a_png_is_identified_like_any_binary() {
+        let path = png_file("images-off.png");
+
+        let off = ImageOptions { enabled: false, ..Default::default() };
+        let content = Content::read(&path, None, off).unwrap();
+        assert!(matches!(content, Content::Summary { .. }));
+        let text = content.layout(60, &Theme::default()).plain.join("\n");
+        assert!(text.contains("PNG image"), "{text}");
+    }
+
+    #[test]
+    fn a_file_that_lies_about_being_an_image_falls_back_to_a_description() {
+        let dir = std::env::temp_dir().join("mdlook-test-images");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("liar-not-a-png.png");
+        // A valid PNG signature followed by garbage: sniffs as an image,
+        // decodes as nothing.
+        std::fs::write(&path, b"\x89PNG\r\n\x1a\n not actually a png").unwrap();
+
+        let content = Content::decode_image(&path, ImageOptions::default());
+        assert!(matches!(content, Content::Summary { .. }), "{content:?}");
+        let text = content.layout(80, &Theme::default()).plain.join("\n");
+        assert!(text.contains("does not decode"), "{text}");
     }
 }

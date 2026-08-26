@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
+use crate::layout::picture::BlockMode;
+
 /// Width of the file browser's sidebar, in columns.
 pub const DEFAULT_SIDEBAR_WIDTH: usize = 30;
 
@@ -39,6 +41,8 @@ pub struct Config {
     pub width: Option<usize>,
     #[serde(default)]
     pub browser: Browser,
+    #[serde(default)]
+    pub images: Images,
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq, Eq)]
@@ -52,6 +56,22 @@ pub struct Browser {
     /// Empty or absent means the built-in identifier is used and no process is
     /// ever started. See [`Settings::probe_command`].
     pub probe_command: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Images {
+    /// Render images as coloured block characters. Off means an image is
+    /// identified like any other binary — the setting for directories that are
+    /// mostly photographs.
+    pub enabled: Option<bool>,
+    /// Starting subpixel grid: `half`, `quadrant`, `sextant` or `octant`.
+    ///
+    /// Typed rather than a string so a misspelling is an error at load, the
+    /// same deal `deny_unknown_fields` gives a mistyped key. The finer grids
+    /// need font support no terminal will report having, which is why this is
+    /// only a starting point — the viewer cycles through them with a key.
+    pub block_mode: Option<BlockMode>,
 }
 
 impl Config {
@@ -114,6 +134,8 @@ impl Config {
             // An empty string is how a config disables a command it previously
             // set, so it means the same as absent rather than "run ``".
             probe_command: self.browser.probe_command.filter(|c| !c.trim().is_empty()),
+            images: cli.images.or(self.images.enabled).unwrap_or(true),
+            block_mode: self.images.block_mode.unwrap_or_default(),
         }
     }
 }
@@ -124,6 +146,7 @@ pub struct Overrides {
     pub browse: Option<bool>,
     pub theme: Option<String>,
     pub width: Option<usize>,
+    pub images: Option<bool>,
 }
 
 /// The config file merged under the command line, with defaults applied.
@@ -142,6 +165,10 @@ pub struct Settings {
     /// of the tool is built around. Setting this is an explicit trade of that
     /// guarantee for `file(1)`'s much larger database.
     pub probe_command: Option<String>,
+    /// Render images as block characters, on by default.
+    pub images: bool,
+    /// The subpixel grid the image renderer starts in.
+    pub block_mode: BlockMode,
 }
 
 impl Default for Settings {
@@ -196,6 +223,7 @@ mod tests {
             browse: Some(false),
             theme: Some("mono".into()),
             width: Some(40),
+            images: None,
         });
         assert!(!settings.browse, "--no-browse must override browse = true");
         assert_eq!(settings.theme, "mono");
@@ -241,6 +269,30 @@ mod tests {
             narrow.resolve(Overrides::default()).sidebar_width,
             *SIDEBAR_WIDTH_RANGE.start()
         );
+    }
+
+    #[test]
+    fn images_default_on_with_half_blocks() {
+        let settings = Settings::default();
+        assert!(settings.images);
+        assert_eq!(settings.block_mode, BlockMode::Half);
+    }
+
+    #[test]
+    fn the_images_section_parses_and_the_flag_overrides_it() {
+        let text = "[images]\nenabled = true\nblock_mode = \"sextant\"";
+        let settings = Config::parse(text)
+            .unwrap()
+            .resolve(Overrides { images: Some(false), ..Default::default() });
+        assert!(!settings.images, "--no-images must override enabled = true");
+        assert_eq!(settings.block_mode, BlockMode::Sextant);
+    }
+
+    #[test]
+    fn a_misspelled_block_mode_is_an_error_not_a_silent_default() {
+        // The same contract as deny_unknown_fields: a config that does nothing
+        // should say so at load, not at the moment an image looks wrong.
+        assert!(Config::parse("[images]\nblock_mode = \"sextants\"").is_err());
     }
 
     #[test]

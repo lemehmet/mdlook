@@ -97,6 +97,17 @@ says what the file *is* (`ELF 64-bit LSB shared object, x86-64`) rather than
 spraying bytes at your terminal. Identification is a built-in table of magic
 numbers, so it works the same on a machine with no `file(1)` on it.
 
+**Images render as coloured blocks.** A PNG, JPEG, GIF or WebP draws in the
+pane as half-block characters — enough shape and colour to know what the image
+*is* without leaving the terminal. `m` cycles through finer subpixel grids
+(half → quadrant → sextant → octant); the finer ones sharpen edges at the cost
+of colour smoothness and need a font that ships the glyphs, which no terminal
+will admit to, so your eyes are the capability test — the status bar names the
+mode you are looking at. In the browser, holding an arrow key through a
+directory of photographs costs nothing: a file is decoded only after the
+selection has rested on it for a beat. `--no-images` (or `enabled = false`
+under `[images]`) turns the whole thing off.
+
 **There is a file browser when you want one.** `mdlook docs/` opens a tree on the
 left and previews whatever the cursor is on. It stays out of the way otherwise:
 with no `--browse` flag and no config asking for it, `mdlook README.md` behaves
@@ -124,6 +135,7 @@ told us what it is.
 | `n` `N` | next / previous match |
 | `t` | outline of headings |
 | `l` | list of links with their URLs |
+| `m` | image blocks: half → quadrant → sextant → octant |
 | `?` | help |
 | `Enter` | jump to the selected entry |
 | `Esc` | cancel a list and return, or clear a search |
@@ -158,6 +170,8 @@ it is over.
     --no-color       disable colour (NO_COLOR is also honoured)
     --browse         open the file browser (rooted here if no path is given)
     --no-browse      go straight to the file, overriding the config
+    --images         render images, overriding a config that turned it off
+    --no-images      identify image files instead of rendering them
     --config <PATH>  read this config instead of the default one
     --no-config      ignore the config file entirely
 ```
@@ -184,6 +198,10 @@ width  = 100          # omit to fill whatever the pane is
 hidden        = false # list dotfiles
 sidebar_width = 30    # columns, clamped to 12..60
 probe_command = ""    # e.g. "file --brief" to identify binaries with file(1)
+
+[images]
+enabled    = true     # render images as coloured blocks
+block_mode = "half"   # half, quadrant, sextant, or octant; `m` cycles at runtime
 ```
 
 A command-line flag always beats the config, which always beats the default. A
