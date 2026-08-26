@@ -4,6 +4,22 @@ Notable changes, newest first. This project follows
 [semantic versioning](https://semver.org); while the major version is 0,
 breaking changes may land in a minor release.
 
+## v0.3.1 — 2026-08-26
+
+### PDFs show their text
+
+- A PDF now opens as its extracted plain text in the numbered, searchable
+  whole-file view — no layout reconstruction, just the words. Extraction is
+  pure Rust, so nothing needs `pdftotext` installed. A scanned PDF with no
+  text layer says so; a corrupt one becomes a note rather than a crash, and
+  extraction is hardened so a hostile file can neither panic the viewer nor
+  write over the screen.
+- In the browser a PDF rides the same debounce and cache as an image: the
+  pane answers instantly and extraction runs only once the selection has
+  rested on the file. Files over 32 MiB are described instead of extracted.
+- The `%PDF-` signature is checked before the text/binary split, so an
+  all-ASCII PDF is extracted rather than shown as its own raw source.
+
 ## v0.3.0 — 2026-08-26
 
 ### Images render as coloured blocks
