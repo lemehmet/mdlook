@@ -4,12 +4,25 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
-use crate::content::Content;
+use crate::content::{Content, ImageOptions};
 use crate::files::Tree;
 use crate::layout::{wrap::text_width, RenderedDoc, Theme};
 use crate::ui::popup::{Popup, PopupKind, PopupRow};
 use crate::ui::search::Search;
+
+/// How long the browser's selection must rest on an image before it is
+/// decoded. Short enough to feel immediate on a deliberate stop, long enough
+/// that holding an arrow key through a directory of photographs decodes none
+/// of them.
+const IMAGE_DEBOUNCE: Duration = Duration::from_millis(200);
+
+/// Decoded images kept for re-preview. Scrolling one file down and back is the
+/// most common browsing motion there is, and it should not pay the debounce
+/// and the decode twice. A handful is plenty; these are full-size pixel
+/// buffers.
+const IMAGE_CACHE: usize = 5;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
@@ -72,6 +85,20 @@ pub struct App {
     previewed: Option<PathBuf>,
     /// Filter text being typed, restored on cancel.
     restore_filter: String,
+
+    // -- images ------------------------------------------------------------
+    /// Whether to render images at all, and in which block mode. The mode here
+    /// is the live one: cycling it changes this and restamps the content.
+    pub image_options: ImageOptions,
+    /// The pane height the current layout was built for. Only an image cares —
+    /// it fits itself to the pane — so only [`Content::wants_height`] content
+    /// re-lays out when this goes stale.
+    layout_height: Option<usize>,
+    /// An image waiting out its debounce: decode it when the clock passes the
+    /// deadline, unless the selection moves first and replaces this.
+    pending_image: Option<(PathBuf, Instant)>,
+    /// Recently decoded images, most recent last.
+    image_cache: Vec<(PathBuf, Content)>,
 }
 
 impl App {
@@ -101,7 +128,17 @@ impl App {
             focus: Focus::Content,
             previewed: None,
             restore_filter: String::new(),
+            image_options: ImageOptions::default(),
+            layout_height: None,
+            pending_image: None,
+            image_cache: Vec::new(),
         }
+    }
+
+    /// Set how images are handled, from the resolved settings.
+    pub fn with_images(mut self, options: ImageOptions) -> Self {
+        self.image_options = options;
+        self
     }
 
     /// Attach a file browser, which starts visible and focused.
@@ -169,9 +206,24 @@ impl App {
     }
 
     fn load(&mut self, path: &Path) {
-        self.content = Content::preview(path, self.probe_command.as_deref());
+        // Whatever was waiting to decode, the selection has moved on.
+        self.pending_image = None;
+        self.content = Content::preview(path, self.probe_command.as_deref(), self.image_options);
+
+        // An image comes back undecoded. A cached decode is shown at once;
+        // otherwise the placeholder stands and the event loop calls
+        // [`App::decode_pending`] once the selection has rested on it.
+        if matches!(self.content, Content::PendingImage { .. }) {
+            match self.cached_image(path) {
+                Some(image) => self.content = image,
+                None => {
+                    self.pending_image = Some((path.to_path_buf(), Instant::now() + IMAGE_DEBOUNCE))
+                }
+            }
+        }
+
         self.title = self.display_path(path);
-        self.rendered = self.content.layout(self.rendered.width.max(8), &self.theme);
+        self.relayout_in_place();
         self.previewed = Some(path.to_path_buf());
         self.scroll = 0;
         self.restore_scroll = 0;
@@ -181,6 +233,87 @@ impl App {
         // because the offsets belonged to the old document.
         if self.search.is_active() {
             self.search.refresh(&self.rendered);
+        }
+    }
+
+    /// Lay the current content out again at the current width and height.
+    fn relayout_in_place(&mut self) {
+        let height = Some(self.viewport);
+        self.rendered = self.content.layout_sized(self.rendered.width.max(8), height, &self.theme);
+        self.layout_height = height;
+    }
+
+    // -- images ------------------------------------------------------------
+
+    /// When the event loop should wake up to decode, if anything is waiting.
+    pub fn pending_image_deadline(&self) -> Option<Instant> {
+        self.pending_image.as_ref().map(|(_, deadline)| *deadline)
+    }
+
+    /// Decode the image whose debounce has expired, if it has.
+    ///
+    /// Called by the event loop when its wait timed out rather than producing
+    /// an event: no event is exactly the signal that the reader has stopped
+    /// moving, which is what the debounce was waiting to know.
+    pub fn decode_pending_image(&mut self) {
+        let Some((path, deadline)) = self.pending_image.clone() else { return };
+        if Instant::now() < deadline {
+            return;
+        }
+        self.pending_image = None;
+
+        let content = Content::decode_image(&path, self.image_options);
+        self.cache_image(path.clone(), content.clone());
+
+        // The decode only ever starts after the selection has rested on the
+        // file, but check anyway: a stale swap would put the wrong picture
+        // under the current title.
+        if self.previewed.as_deref() == Some(path.as_path()) {
+            self.content = content;
+            self.relayout_in_place();
+            if self.search.is_active() {
+                self.search.refresh(&self.rendered);
+            }
+        }
+    }
+
+    /// A cached decode for this path, restamped with the current block mode.
+    fn cached_image(&mut self, path: &Path) -> Option<Content> {
+        let index = self.image_cache.iter().position(|(p, _)| p == path)?;
+        // Move it to the back: recently shown is the last thing to evict.
+        let entry = self.image_cache.remove(index);
+        self.image_cache.push(entry);
+        let mut content = self.image_cache.last().map(|(_, c)| c.clone())?;
+        if let Content::Image { mode, .. } = &mut content {
+            *mode = self.image_options.mode;
+        }
+        Some(content)
+    }
+
+    fn cache_image(&mut self, path: PathBuf, content: Content) {
+        self.image_cache.retain(|(p, _)| p != &path);
+        self.image_cache.push((path, content));
+        if self.image_cache.len() > IMAGE_CACHE {
+            self.image_cache.remove(0);
+        }
+    }
+
+    /// Step to the next block mode and redraw the image in it.
+    ///
+    /// The cycle is the capability query: no terminal reports which block
+    /// glyphs its font draws, so the reader flips through and stops on the one
+    /// that looks right. The change applies to the session, not the config —
+    /// the config is where the answer goes once they know it.
+    pub fn cycle_block_mode(&mut self) {
+        self.image_options.mode = self.image_options.mode.next();
+        let mode = self.image_options.mode;
+        if let Content::Image { mode: current, .. } = &mut self.content {
+            *current = mode;
+            self.relayout_in_place();
+            self.clamp();
+        } else {
+            // Nothing on screen to show it with, so say it instead.
+            self.message = Some(format!("image blocks: {}", mode.label()));
         }
     }
 
@@ -302,7 +435,11 @@ impl App {
     /// before and after. Anchoring to the nearest heading and preserving the
     /// offset *within that section* keeps you where you were reading.
     pub fn relayout(&mut self, width: usize) {
-        if width == self.rendered.width || width == 0 {
+        // Height matters only to an image, which fits itself to the pane; for
+        // everything else a height change alone means nothing to layout.
+        let height = Some(self.viewport);
+        let height_stale = self.content.wants_height() && self.layout_height != height;
+        if width == 0 || (width == self.rendered.width && !height_stale) {
             return;
         }
 
@@ -316,7 +453,8 @@ impl App {
             .map(|(index, a)| (index, self.scroll - a.line));
         let fraction = self.scroll as f64 / self.rendered.len().max(1) as f64;
 
-        self.rendered = self.content.layout(width, &self.theme);
+        self.rendered = self.content.layout_sized(width, height, &self.theme);
+        self.layout_height = height;
 
         self.scroll = match anchored {
             Some((index, offset)) => match self.rendered.anchors.get(index) {
@@ -558,6 +696,8 @@ fn help_popup(theme: &Theme, browsing: bool) -> Popup {
         ("", ""),
         ("t", "outline of headings"),
         ("l", "list of links"),
+        ("", ""),
+        ("m", "image blocks: half → quadrant → sextant → octant"),
     ];
 
     /// Shown only when there is a browser to drive; listing keys that do

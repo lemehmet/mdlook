@@ -144,6 +144,28 @@ const SIGNATURES: &[Signature] = &[
     sig(0, b"\xfe\xff", "UTF-16 text (big-endian)"),
 ];
 
+/// The image formats the built-in viewer can decode, from the file's bytes.
+///
+/// A subset of what [`describe`] can *name* on purpose: naming a format costs a
+/// signature, rendering one costs a decoder in the binary. These four are the
+/// ones that actually turn up beside markdown; everything else keeps being
+/// identified rather than shown.
+pub fn supported_image(head: &[u8]) -> Option<&'static str> {
+    if head.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Some("PNG image");
+    }
+    if head.starts_with(b"\xff\xd8\xff") {
+        return Some("JPEG image");
+    }
+    if head.starts_with(b"GIF87a") || head.starts_with(b"GIF89a") {
+        return Some("GIF image");
+    }
+    if head.starts_with(b"RIFF") && head.get(8..12) == Some(b"WEBP") {
+        return Some("WebP image");
+    }
+    None
+}
+
 /// Identify a binary file from the head of its contents.
 ///
 /// Returns something you could act on — the format, and for executables the

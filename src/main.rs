@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::Parser;
 use mdlook::config::{Overrides, Settings};
+use mdlook::content::ImageOptions;
 use mdlook::files::Tree;
 use mdlook::render::tui::FALLBACK_WIDTH;
 use mdlook::ui::App;
@@ -47,6 +48,16 @@ struct Args {
     #[arg(long, overrides_with = "browse")]
     no_browse: bool,
 
+    /// Render images as coloured block characters. This is the default; the
+    /// flag exists to override a config that turned it off.
+    #[arg(long, overrides_with = "no_images")]
+    images: bool,
+
+    /// Identify image files instead of rendering them. Worth it in a directory
+    /// that is mostly photographs.
+    #[arg(long, overrides_with = "images")]
+    no_images: bool,
+
     /// Read this config file instead of the one in the default location.
     #[arg(long, value_name = "PATH", conflicts_with = "no_config")]
     config: Option<PathBuf>,
@@ -66,6 +77,7 @@ impl Args {
             browse: self.browse.then_some(true).or(self.no_browse.then_some(false)),
             theme: self.theme.clone(),
             width: self.width,
+            images: self.images.then_some(true).or(self.no_images.then_some(false)),
         }
     }
 }
@@ -112,12 +124,20 @@ fn main() -> Result<()> {
     let probe = settings.probe_command.as_deref();
     let browse = interactive && wants_browser(target.as_deref(), &settings);
 
+    // Mono means the reader asked for no colour, and a picture made of coloured
+    // cells is nothing but colour — so under mono, images stay identified
+    // binaries whatever the images setting says.
+    let images = ImageOptions {
+        enabled: settings.images && kind != ThemeKind::Mono,
+        mode: settings.block_mode,
+    };
+
     let (content, title) = match args.file.as_deref() {
         // The browser is rooted here and nothing is selected yet, so the pane
         // says so until the reader moves the cursor onto a file.
         None if browse_here => {
             let root = target.clone().unwrap_or_default();
-            (Content::preview(&root, probe), ".".to_string())
+            (Content::preview(&root, probe, images), ".".to_string())
         }
         // Piped input has no name to classify by, and the documented contract
         // for a pipe is markdown, so it is not sniffed.
@@ -129,10 +149,10 @@ fn main() -> Result<()> {
         Some(path) if browse => match Path::new(path).is_dir() {
             // Nothing is selected yet, so there is nothing to show beside the
             // tree until the reader moves the cursor onto a file.
-            true => (Content::preview(Path::new(path), probe), path.to_string()),
-            false => (Content::read(Path::new(path), probe)?, path.to_string()),
+            true => (Content::preview(Path::new(path), probe, images), path.to_string()),
+            false => (Content::read(Path::new(path), probe, images)?, path.to_string()),
         },
-        Some(path) => (Content::read(Path::new(path), probe)?, path.to_string()),
+        Some(path) => (Content::read(Path::new(path), probe, images)?, path.to_string()),
     };
 
     if interactive {
@@ -140,7 +160,7 @@ fn main() -> Result<()> {
         // got — which is narrower than the terminal when the browser is open —
         // and lays out again if this guess was wrong.
         let width = settings.width.unwrap_or_else(terminal_width);
-        let mut app = App::new(content, title, theme, width);
+        let mut app = App::new(content, title, theme, width).with_images(images);
         if browse {
             let (root, reveal) = browser_root(target.as_deref())?;
             let mut tree = Tree::new(&root, settings.hidden);

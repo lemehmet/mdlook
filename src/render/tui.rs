@@ -59,7 +59,27 @@ fn event_loop(
             return Ok(());
         }
 
-        match event::read()? {
+        // Normally this blocks on the next event. With an image waiting out
+        // its debounce the wait gets a deadline instead, and *timing out* is
+        // the interesting outcome: no event for that long means the reader
+        // has stopped on the file, which is the moment to pay for the decode.
+        let event = match app.pending_image_deadline() {
+            Some(deadline) => {
+                let timeout = deadline.saturating_duration_since(std::time::Instant::now());
+                match event::poll(timeout)? {
+                    true => Some(event::read()?),
+                    false => None,
+                }
+            }
+            None => Some(event::read()?),
+        };
+
+        let Some(event) = event else {
+            app.decode_pending_image();
+            continue;
+        };
+
+        match event {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
                 app.message = None;
                 handle_key(app, key);
@@ -141,8 +161,9 @@ fn draw(frame: &mut Frame, app: &mut App, max_width: Option<usize>) {
 
     // Relayout uses the document pane's width, not the frame's: toggling the
     // browser is a width change like any other, and re-anchors the same way.
-    app.relayout(content_width(body, max_width));
+    // The viewport goes first because an image lays out to fit it.
     app.viewport = body.height as usize;
+    app.relayout(content_width(body, max_width));
     // Height changes can leave the scroll past the new end of the document.
     app.scroll_by(0);
 
@@ -210,6 +231,11 @@ fn draw_bar(frame: &mut Frame, app: &App, area: Rect) {
     let percent = if app.max_scroll() == 0 { 100 } else { app.scroll * 100 / app.max_scroll() };
 
     let mut left = format!(" {} ", app.title);
+    // The image renderer's line: which block mode drew this and at what
+    // effective resolution. `m` changes it, so it earns its place on the bar.
+    if let Some(status) = &app.rendered.status {
+        left.push_str(&format!(" │ {status} "));
+    }
     if app.search.is_active() {
         left.push_str(&format!(
             " │ /{}  {}/{} ",
@@ -329,6 +355,9 @@ fn shared_key(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::Char('q') => app.quit = true,
         KeyCode::Char('?') => app.open_popup(PopupKind::Help),
         KeyCode::Tab | KeyCode::BackTab => app.toggle_focus(),
+        // Shared because the image being recoloured is in the document pane
+        // while the cursor that chose it is usually still in the tree.
+        KeyCode::Char('m') => app.cycle_block_mode(),
         _ => return false,
     }
     true

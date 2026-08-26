@@ -7,6 +7,7 @@
 
 use std::process::Command;
 
+use mdlook::content::ImageOptions;
 use mdlook::layout::wrap::text_width;
 use mdlook::ui::app::App;
 use mdlook::ui::popup::PopupKind;
@@ -141,7 +142,7 @@ fn a_binary_is_identified_without_reading_all_of_it() {
     bytes[18] = 0x3e;
     let path = scratch("big.bin", &bytes);
 
-    let content = Content::read(&path, None).expect("reading fixture");
+    let content = Content::read(&path, None, ImageOptions::default()).expect("reading fixture");
     let text = content.layout(80, &Theme::default()).plain.join("\n");
     assert!(text.contains("ELF 64-bit LSB executable, x86-64"), "got: {text}");
     assert!(text.contains("4.0 MiB"), "size should be the whole file, got: {text}");
@@ -152,7 +153,7 @@ fn a_binary_is_identified_without_reading_all_of_it() {
 #[test]
 fn a_markdown_file_read_from_disk_is_still_markdown() {
     let path = scratch("doc.md", b"# Title\n\nSoft\nwrapped.\n");
-    let content = Content::read(&path, None).expect("reading fixture");
+    let content = Content::read(&path, None, ImageOptions::default()).expect("reading fixture");
     let rendered = content.layout(80, &Theme::default());
     assert_eq!(rendered.anchors.len(), 1);
     assert!(
@@ -213,11 +214,14 @@ fn a_configured_probe_command_replaces_the_built_in_description() {
     // `echo` stands in for `file(1)` so the test does not depend on it being
     // installed: what matters is that the configured command's output is what
     // lands in the pane.
-    let path = scratch("probe.bin", b"\x89PNG\r\n\x1a\n\x00\x00");
-    let content = Content::read(&path, Some("echo identified-by-command")).expect("reading");
+    // Not an image on purpose: an image would be decoded rather than probed,
+    // so gzip stands in as "a binary the viewer only describes".
+    let path = scratch("probe.bin", b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x00");
+    let content = Content::read(&path, Some("echo identified-by-command"), ImageOptions::default())
+        .expect("reading");
     let text = content.layout(80, &Theme::default()).plain.join("\n");
     assert!(text.contains("identified-by-command"), "got: {text}");
-    assert!(!text.contains("PNG image"), "the command should have replaced it");
+    assert!(!text.contains("gzip"), "the command should have replaced it");
     std::fs::remove_file(&path).ok();
 }
 
@@ -225,18 +229,22 @@ fn a_configured_probe_command_replaces_the_built_in_description() {
 fn a_probe_command_that_does_not_exist_falls_back_quietly() {
     // A missing `file(1)` should leave the built-in answer in place, not put an
     // error message where the description belongs.
-    let path = scratch("fallback.bin", b"\x89PNG\r\n\x1a\n\x00\x00");
-    let content = Content::read(&path, Some("mdlook-no-such-command-exists")).expect("reading");
+    let path = scratch("fallback.bin", b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x00");
+    let content =
+        Content::read(&path, Some("mdlook-no-such-command-exists"), ImageOptions::default())
+            .expect("reading");
     let text = content.layout(80, &Theme::default()).plain.join("\n");
-    assert!(text.contains("PNG image"), "got: {text}");
+    assert!(text.contains("gzip compressed data"), "got: {text}");
     std::fs::remove_file(&path).ok();
 }
 
 #[test]
 fn probe_output_is_neutralised_like_everything_else_that_reaches_the_screen() {
     // The command echoes the file's name, and file names are attacker-supplied.
-    let path = scratch("escape.bin", b"\x89PNG\r\n\x1a\n\x00\x00");
-    let content = Content::read(&path, Some("printf hostile\\x1b[31mred\\n")).expect("reading");
+    let path = scratch("escape.bin", b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x00");
+    let content =
+        Content::read(&path, Some("printf hostile\\x1b[31mred\\n"), ImageOptions::default())
+            .expect("reading");
     let text = content.layout(80, &Theme::default()).plain.join("\n");
     assert!(!text.contains('\u{1b}'), "an escape reached the rendered text");
     std::fs::remove_file(&path).ok();
@@ -246,12 +254,12 @@ fn probe_output_is_neutralised_like_everything_else_that_reaches_the_screen() {
 fn a_probe_command_is_not_run_through_a_shell() {
     // If this were handed to a shell the redirection would create a file and the
     // description would come back empty. Run directly, it is just arguments.
-    let path = scratch("noshell.bin", b"\x89PNG\r\n\x1a\n\x00\x00");
+    let path = scratch("noshell.bin", b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x00");
     let marker = std::env::temp_dir().join(format!("mdlook-shell-{}", std::process::id()));
     let _ = std::fs::remove_file(&marker);
     let command = format!("echo pwned > {}", marker.display());
 
-    let content = Content::read(&path, Some(&command)).expect("reading");
+    let content = Content::read(&path, Some(&command), ImageOptions::default()).expect("reading");
     let text = content.layout(80, &Theme::default()).plain.join("\n");
     assert!(!marker.exists(), "the redirection was interpreted — a shell was involved");
     assert!(text.contains("pwned >"), "the arguments should be literal, got: {text}");
