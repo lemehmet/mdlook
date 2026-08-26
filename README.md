@@ -97,6 +97,12 @@ says what the file *is* (`ELF 64-bit LSB shared object, x86-64`) rather than
 spraying bytes at your terminal. Identification is a built-in table of magic
 numbers, so it works the same on a machine with no `file(1)` on it.
 
+**PDFs show their text.** A PDF opens as extracted plain text in the same
+numbered, searchable view — no layout reconstruction, just the words, which is
+what you want when the question is "what does this document say". Extraction is
+pure Rust, so it needs no `pdftotext` installed. A scanned PDF with no text
+layer says so instead of showing nothing.
+
 **Images render as coloured blocks.** A PNG, JPEG, GIF or WebP draws in the
 pane as half-block characters — enough shape and colour to know what the image
 *is* without leaving the terminal. `m` cycles through finer subpixel grids
