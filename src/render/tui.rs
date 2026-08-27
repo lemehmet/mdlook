@@ -354,6 +354,7 @@ fn shared_key(app: &mut App, key: KeyEvent) -> bool {
     match key.code {
         KeyCode::Char('q') => app.quit = true,
         KeyCode::Char('?') => app.open_popup(PopupKind::Help),
+        KeyCode::Char('a') => app.open_popup(PopupKind::About),
         KeyCode::Tab | KeyCode::BackTab => app.toggle_focus(),
         // Shared because the image being recoloured is in the document pane
         // while the cursor that chose it is usually still in the tree.
@@ -389,11 +390,19 @@ fn tree_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('g') | KeyCode::Home => app.tree_move(Tree::to_top),
         KeyCode::Char('G') | KeyCode::End => app.tree_move(Tree::to_bottom),
 
-        KeyCode::Char('l') | KeyCode::Right => app.tree_move(|t| {
+        KeyCode::Char('l') => app.tree_move(|t| {
             t.expand();
         }),
-        KeyCode::Char('h') | KeyCode::Left => app.tree_move(|t| {
+        KeyCode::Char('h') => app.tree_move(|t| {
             t.collapse();
+        }),
+        // The arrows navigate rather than fold — `l`/`h` keep that job. With no
+        // horizontal scrolling anywhere, `←`/`→` are free to move between the
+        // panes, which sit exactly that way on screen: `→` steps into the
+        // document when a file is selected, `←` climbs towards the root.
+        KeyCode::Right => app.enter_document(),
+        KeyCode::Left => app.tree_move(|t| {
+            t.to_parent();
         }),
         KeyCode::Enter => app.open_selection(),
 
@@ -432,6 +441,14 @@ fn content_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('b') | KeyCode::PageUp => app.scroll_pages(-1),
         KeyCode::Char('g') | KeyCode::Home => app.to_top(),
         KeyCode::Char('G') | KeyCode::End => app.to_bottom(),
+
+        // The counterpart of `→` in the tree: the document never scrolls
+        // sideways, so `←` steps back out to the browser. `→` stays unbound.
+        KeyCode::Left => {
+            if app.browsing() {
+                app.focus = Focus::Tree;
+            }
+        }
 
         KeyCode::Char('/') => app.open_search(),
         KeyCode::Char('n') => app.step_match(true),

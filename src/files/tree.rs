@@ -186,16 +186,28 @@ impl Tree {
             return true;
         }
 
-        // Walk up: find the enclosing directory row above this one.
-        if row.depth > 0 {
-            if let Some(index) =
-                self.rows[..self.selected].iter().rposition(|r| r.depth < row.depth && r.is_dir)
-            {
-                self.selected = index;
-                return true;
-            }
+        // Nothing to fold, so walk up instead.
+        self.to_parent()
+    }
+
+    /// Move the cursor to the enclosing directory, without folding anything.
+    ///
+    /// Pure movement, which is what separates `←` from `h`: the arrow walks the
+    /// tree while the letter reshapes it. At the top level there is no parent
+    /// row — the root is the header, not a row — so the cursor stays put.
+    pub fn to_parent(&mut self) -> bool {
+        let Some(row) = self.rows.get(self.selected) else { return false };
+        if row.depth == 0 {
+            return false;
         }
-        false
+        let depth = row.depth;
+        match self.rows[..self.selected].iter().rposition(|r| r.depth < depth && r.is_dir) {
+            Some(index) => {
+                self.selected = index;
+                true
+            }
+            None => false,
+        }
     }
 
     /// Expand or collapse the selection, whichever applies.
@@ -574,6 +586,23 @@ mod tests {
         assert_eq!(tree.selection().unwrap().name, "guide.md");
         assert!(tree.collapse());
         assert_eq!(tree.selection().unwrap().name, "docs", "should walk up, not do nothing");
+    }
+
+    #[test]
+    fn left_climbs_to_the_parent_without_folding_anything() {
+        let fixture = Fixture::new("toparent");
+        let mut tree = Tree::new(&fixture.0, false);
+        tree.expand(); // docs
+        tree.step(1); // docs/deep, a collapsed directory
+        assert_eq!(tree.selection().unwrap().name, "deep");
+        assert!(tree.to_parent());
+        assert_eq!(tree.selection().unwrap().name, "docs");
+        assert!(
+            tree.rows.iter().any(|r| r.name == "deep"),
+            "docs must stay expanded: ← moves, it does not collapse"
+        );
+        assert!(!tree.to_parent(), "a top-level row has no parent row to climb to");
+        assert_eq!(tree.selection().unwrap().name, "docs");
     }
 
     #[test]

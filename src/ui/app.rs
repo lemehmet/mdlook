@@ -338,18 +338,26 @@ impl App {
     /// the cursor is already on the file being shown.
     pub fn open_selection(&mut self) {
         let Some(tree) = self.sidebar.as_mut() else { return };
-        match tree.selection().map(|row| (row.is_dir, row.path.clone())) {
-            Some((true, _)) => {
-                tree.toggle();
-            }
-            Some((false, path)) => {
-                if self.previewed.as_deref() != Some(path.as_path()) {
-                    self.load(&path);
-                }
-                self.focus = Focus::Content;
-            }
-            None => {}
+        if tree.selection().is_some_and(|row| row.is_dir) {
+            tree.toggle();
+            return;
         }
+        self.enter_document();
+    }
+
+    /// Move focus to the document pane when the cursor is on a file; a
+    /// directory or a note leaves focus where it is. This is `→` in the tree,
+    /// mirroring `←` in the document, so the two panes sit to the left and
+    /// right of each other on the keyboard as well as on the screen.
+    pub fn enter_document(&mut self) {
+        let Some(path) = self.sidebar.as_ref().and_then(Tree::selected_file).map(Path::to_path_buf)
+        else {
+            return;
+        };
+        if self.previewed.as_deref() != Some(path.as_path()) {
+            self.load(&path);
+        }
+        self.focus = Focus::Content;
     }
 
     // -- browser filter ----------------------------------------------------
@@ -610,6 +618,7 @@ impl App {
             PopupKind::Links => self.links_popup(),
             PopupKind::Outline => self.outline_popup(),
             PopupKind::Help => help_popup(&self.theme, self.sidebar.is_some()),
+            PopupKind::About => about_popup(&self.theme),
         };
         self.popup = Some(popup);
     }
@@ -709,8 +718,10 @@ fn help_popup(theme: &Theme, browsing: bool) -> Popup {
         ("Tab", "switch between the tree and the document"),
         ("Ctrl-B", "show or hide the tree"),
         ("j / k, ↓ / ↑", "move the selection, previewing as you go"),
-        ("l / h, → / ←", "expand / collapse a directory"),
+        ("l / h", "expand / collapse a directory"),
         ("Enter", "open the selection"),
+        ("→", "read the selected file"),
+        ("←", "up to the parent; from the document, back to the tree"),
         ("/", "filter the tree by name"),
         (".", "show or hide dotfiles"),
     ];
@@ -721,6 +732,7 @@ fn help_popup(theme: &Theme, browsing: bool) -> Popup {
         ("Esc", "cancel and return"),
         ("", ""),
         ("?", "this help"),
+        ("a", "about mdlook"),
         ("q", "quit"),
     ];
 
@@ -751,6 +763,30 @@ fn help_popup(theme: &Theme, browsing: bool) -> Popup {
     section("Lists", LISTS, &mut rows);
 
     Popup::new(PopupKind::Help, "Keys", rows)
+}
+
+fn about_popup(theme: &Theme) -> Popup {
+    // Straight out of Cargo.toml, so a release bump cannot leave this stale.
+    let version = concat!("mdlook ", env!("CARGO_PKG_VERSION"));
+    let repository = env!("CARGO_PKG_REPOSITORY");
+
+    let row = |text: String, style: Style| PopupRow {
+        lines: vec![Line::from(Span::styled(text, style))],
+        target: 0,
+    };
+
+    let rows = vec![
+        row(format!("  {version}"), theme.heading(1)),
+        row("  a terminal markdown reader".to_string(), theme.popup_dim),
+        blank_row(),
+        row(format!("  {repository}"), theme.link),
+        blank_row(),
+        row("  Found a bug, or missing something? Reports and".to_string(), theme.text),
+        row("  contributions are very welcome — open an issue or a".to_string(), theme.text),
+        row("  pull request at the repository above.".to_string(), theme.text),
+    ];
+
+    Popup::new(PopupKind::About, "About", rows)
 }
 
 fn blank_row() -> PopupRow {

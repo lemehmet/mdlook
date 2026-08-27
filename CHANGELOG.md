@@ -4,6 +4,19 @@ Notable changes, newest first. This project follows
 [semantic versioning](https://semver.org); while the major version is 0,
 breaking changes may land in a minor release.
 
+## Unreleased
+
+### Arrows move between the panes
+
+- With the browser open, `←` and `→` now navigate rather than fold: in the
+  tree `←` climbs to the parent directory and `→` steps into the document
+  when a file is selected; in the document `←` steps back out to the tree.
+  Nothing scrolls sideways, so the keys were free, and they sit next to the
+  ones you were already using — no more reaching for `Tab`. `l` and `h`
+  still expand and collapse.
+- `a` opens an about box with the version, a link to the repository, and a
+  note that bug reports and contributions are welcome.
+
 ## v0.3.2 — 2026-08-27
 
 ### Installable with Homebrew
