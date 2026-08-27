@@ -168,6 +168,10 @@ fn main() -> Result<()> {
                 tree.reveal(&path);
             }
             app = app.with_sidebar(tree, settings.sidebar_width, settings.probe_command.clone());
+        } else if let Some(path) = target.filter(|p| p.is_file()) {
+            // Named so the hex toggle can re-read it. The filter drops the
+            // stdin dash, which names no file the toggle could open.
+            app = app.with_file(path);
         }
         return render::tui::run(app, settings.width);
     }

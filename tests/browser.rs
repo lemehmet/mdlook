@@ -304,3 +304,49 @@ fn a_note_row_is_never_treated_as_a_file() {
     app.open_selection();
     assert_eq!(body(&app), before, "opening a note should do nothing at all");
 }
+
+// -- hex -------------------------------------------------------------------
+
+#[test]
+fn x_shows_the_selected_file_as_hex_and_x_again_leaves() {
+    let fixture = Fixture::new("hex");
+    let mut app = fixture.app();
+    fixture.select(&mut app, "blob.bin");
+
+    app.toggle_hex();
+    assert!(matches!(app.content, Content::Hex { .. }), "x opens the dump");
+    let dump = body(&app);
+    assert!(dump.contains("89 50 4e 47"), "the bytes are on the page: {dump}");
+    assert!(dump.contains("PNG"), "printable bytes read in the ASCII column: {dump}");
+
+    app.toggle_hex();
+    assert!(!matches!(app.content, Content::Hex { .. }), "x again goes back");
+}
+
+#[test]
+fn hex_does_not_follow_the_cursor_to_the_next_file() {
+    let fixture = Fixture::new("hex-per-file");
+    let mut app = fixture.app();
+    fixture.select(&mut app, "main.rs");
+    app.toggle_hex();
+    assert!(matches!(app.content, Content::Hex { .. }));
+
+    fixture.select(&mut app, "README.md");
+    assert!(
+        matches!(app.content, Content::Markdown(_)),
+        "the next file arrives in its normal view"
+    );
+}
+
+#[test]
+fn a_text_file_round_trips_through_hex() {
+    let fixture = Fixture::new("hex-roundtrip");
+    let mut app = fixture.app();
+    fixture.select(&mut app, "main.rs");
+    assert!(matches!(app.content, Content::Text { .. }));
+
+    app.toggle_hex();
+    assert!(body(&app).contains("fn main"), "the source shows in the ASCII column");
+    app.toggle_hex();
+    assert!(matches!(app.content, Content::Text { .. }), "back to highlighted source");
+}

@@ -150,6 +150,7 @@ told us what it is.
 | `t` | outline of headings |
 | `l` | list of links with their URLs |
 | `m` | image blocks: half → quadrant → sextant → octant |
+| `x` | hex view of the file — `x` again to go back |
 | `?` | help |
 | `a` | about mdlook |
 | `Enter` | jump to the selected entry |
@@ -260,7 +261,7 @@ a width change like any other, and re-anchors the same way as a resize.
 ## Tests
 
 ```
-cargo test        # 185 tests
+cargo test        # 225 tests
 cargo clippy --all-targets
 ```
 
