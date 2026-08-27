@@ -325,3 +325,42 @@ fn resize_keeps_the_scroll_inside_the_document() {
         );
     }
 }
+
+// -- hex -------------------------------------------------------------------
+
+#[test]
+fn hex_with_no_file_reports_rather_than_toggles() {
+    // Stdin: there is a document but no path, so there is nothing to re-read.
+    let mut app = app();
+    app.toggle_hex();
+    assert!(matches!(app.content, mdlook::Content::Markdown(_)), "the document is untouched");
+    assert!(app.message.is_some(), "the refusal is said, not silent");
+}
+
+#[test]
+fn a_named_file_toggles_to_hex_and_back() {
+    let dir = std::env::temp_dir().join("mdlook-viewer-hex");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("named.md");
+    std::fs::write(&path, "# Title\n").unwrap();
+
+    let mut app = App::new(
+        mdlook::Content::read(&path, None, Default::default()).unwrap(),
+        "named.md".into(),
+        Theme::default(),
+        80,
+    )
+    .with_file(path);
+    app.viewport = 10;
+
+    app.toggle_hex();
+    assert!(matches!(app.content, mdlook::Content::Hex { .. }));
+    assert!(
+        app.rendered.plain[0].starts_with("00000000  23 20 54 69 74 6c 65 0a"),
+        "{}",
+        app.rendered.plain[0]
+    );
+
+    app.toggle_hex();
+    assert!(matches!(app.content, mdlook::Content::Markdown(_)), "back to rendered markdown");
+}

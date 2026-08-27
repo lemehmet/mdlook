@@ -1,5 +1,6 @@
 pub mod blocks;
 pub mod code;
+pub mod hex;
 pub mod picture;
 pub mod source;
 pub mod table;

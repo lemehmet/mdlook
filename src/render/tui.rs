@@ -359,6 +359,9 @@ fn shared_key(app: &mut App, key: KeyEvent) -> bool {
         // Shared because the image being recoloured is in the document pane
         // while the cursor that chose it is usually still in the tree.
         KeyCode::Char('m') => app.cycle_block_mode(),
+        // Shared for the same reason: the file being dumped is in the document
+        // pane wherever the cursor that chose it happens to be.
+        KeyCode::Char('x') => app.toggle_hex(),
         _ => return false,
     }
     true

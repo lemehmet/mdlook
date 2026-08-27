@@ -6,6 +6,16 @@ breaking changes may land in a minor release.
 
 ## Unreleased
 
+### A hex viewer
+
+- `x` shows the file being viewed as a hex dump — offsets, bytes, and an
+  ASCII column, sixteen bytes to a row where the pane is wide enough and
+  eight or four where it is not — and `x` again returns to the normal view.
+  It works on any file, which gives binaries a real view at last, and search
+  works inside the dump like anywhere else. Only the first MiB is shown,
+  with a notice saying how much more the file holds; a pager is not the
+  tool for auditing byte thirty million.
+
 ### Arrows move between the panes
 
 - With the browser open, `←` and `→` now navigate rather than fold: in the

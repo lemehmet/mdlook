@@ -141,6 +141,14 @@ impl App {
         self
     }
 
+    /// Name the file the pane is showing, when mdlook was pointed straight at
+    /// one. The browser maintains this itself as the cursor moves; stdin has
+    /// no path to name. This is what the hex toggle re-reads.
+    pub fn with_file(mut self, path: PathBuf) -> Self {
+        self.previewed = Some(path);
+        self
+    }
+
     /// Attach a file browser, which starts visible and focused.
     pub fn with_sidebar(mut self, tree: Tree, width: usize, probe: Option<String>) -> Self {
         self.probe_command = probe;
@@ -317,6 +325,38 @@ impl App {
         } else {
             // Nothing on screen to show it with, so say it instead.
             self.message = Some(format!("image blocks: {}", mode.label()));
+        }
+    }
+
+    /// Show the current file as a hex dump, or step back out of it.
+    ///
+    /// Both directions re-read from disk rather than convert: the text view
+    /// holds a decoded string and a described binary holds nothing at all, so
+    /// there are no bytes in hand either way — and re-reading keeps the
+    /// "whatever the file is *now*" contract of [`Content::preview_resolved`].
+    pub fn toggle_hex(&mut self) {
+        let Some(path) = self.previewed.clone() else {
+            // Stdin, or a browser whose cursor has not landed on a file yet.
+            self.message = Some("no file to show as hex".to_string());
+            return;
+        };
+        // Whatever was waiting out its debounce, the reader asked for
+        // something else; left in place, the resolve would land its image on
+        // top of the dump a moment after it opened.
+        self.pending_preview = None;
+        self.content = match self.content {
+            Content::Hex { .. } => {
+                Content::preview_resolved(&path, self.probe_command.as_deref(), self.image_options)
+            }
+            _ => Content::read_hex(&path),
+        };
+        self.relayout_in_place();
+        // The scroll is kept rather than reset: the positions do not
+        // correspond, but a round trip — `x` to peek, `x` to come back —
+        // should land where it left.
+        self.clamp();
+        if self.search.is_active() {
+            self.search.refresh(&self.rendered);
         }
     }
 
@@ -710,6 +750,7 @@ fn help_popup(theme: &Theme, browsing: bool) -> Popup {
         ("l", "list of links"),
         ("", ""),
         ("m", "image blocks: half → quadrant → sextant → octant"),
+        ("x", "hex view of the file — x again to go back"),
     ];
 
     /// Shown only when there is a browser to drive; listing keys that do

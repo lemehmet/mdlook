@@ -37,6 +37,14 @@ pub const MAX_TEXT_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_IMAGE_PIXELS: u64 = 64_000_000;
 
+/// Largest slice of a file the hex view shows.
+///
+/// A dump line covers at most sixteen bytes, so even this much is sixty-five
+/// thousand rows — far past what anyone pages through, and still cheap enough
+/// to lay out on the keypress that asked for it. The layout says what was
+/// left off.
+pub const MAX_HEX_BYTES: u64 = 1024 * 1024;
+
 /// Largest PDF handed to the text extractor.
 ///
 /// Extraction walks every page, so this bounds a cursor-move's worst case the
@@ -77,6 +85,17 @@ pub enum Content {
         name: String,
         headline: String,
         detail: String,
+    },
+    /// Raw bytes shown as a hex dump — any file at all, behind the `x` toggle.
+    ///
+    /// Bytes rather than a path, so layout stays a pure function of the
+    /// content like every other variant. At most [`MAX_HEX_BYTES`] are held;
+    /// `size` is the whole file, so the layout can say what was left off. The
+    /// `Arc` is for the same reason as the image's: `Content` is cloned
+    /// freely, and a megabyte is too much to copy casually.
+    Hex {
+        bytes: Arc<Vec<u8>>,
+        size: u64,
     },
     /// A decoded image, drawn as coloured block characters.
     ///
@@ -137,6 +156,7 @@ impl Content {
             Content::Summary { name, headline, detail } => {
                 source::summary(name, headline, detail, width, theme)
             }
+            Content::Hex { bytes, size } => layout::hex::hex(bytes, *size, width, theme),
             Content::Image { name, format, size, pixels, mode } => {
                 let caption = picture::Caption { name, format, size: *size };
                 picture::picture(caption, pixels, *mode, width, height, theme)
@@ -332,6 +352,37 @@ impl Content {
         }
     }
 
+    /// Read a file for the hex view: the first [`MAX_HEX_BYTES`] of anything.
+    ///
+    /// Never fails, like [`Content::preview`], because the toggle runs inside
+    /// the viewer, where every disappointment has to land as something the
+    /// pane can show. The regular-file guard is there for the same reason as
+    /// the preview's: this opens whatever the toggle was pressed on.
+    pub fn read_hex(path: &Path) -> Self {
+        let name = path.to_string_lossy().into_owned();
+        let metadata = match std::fs::metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) => return Self::note(&name, "cannot be read", &error.to_string()),
+        };
+        if !metadata.is_file() {
+            return Self::note(&name, "not a regular file", "nothing to display");
+        }
+
+        let mut bytes = Vec::new();
+        let read =
+            File::open(path).and_then(|file| file.take(MAX_HEX_BYTES).read_to_end(&mut bytes));
+        match read {
+            Ok(_) => {
+                // The file may have changed size since the stat; taking the
+                // larger number keeps "showing the first…" from ever claiming
+                // more than is actually shown.
+                let size = metadata.len().max(bytes.len() as u64);
+                Content::Hex { bytes: Arc::new(bytes), size }
+            }
+            Err(error) => Self::note(&name, "cannot be read", &error.to_string()),
+        }
+    }
+
     /// Decode an image file into [`Content::Image`], whatever it takes.
     ///
     /// Never fails, for the same reason [`Content::preview`] never fails: this
@@ -503,6 +554,7 @@ mod tests {
             Content::from_bytes("a.md", b"# Title\n\n- item\n", 16),
             Content::from_bytes("a.rs", b"fn main() {}\n", 13),
             Content::from_bytes("a.bin", b"\x00\x01\x02", 3),
+            Content::Hex { bytes: Arc::new(vec![0x00, 0x41, 0xff]), size: 3 },
         ];
         for content in &contents {
             for width in 1..30 {
@@ -657,6 +709,46 @@ mod tests {
         assert!(matches!(content, Content::Summary { .. }), "{content:?}");
         let text = content.layout(80, &Theme::default()).plain.join("\n");
         assert!(text.contains("PDF document"), "{text}");
+    }
+
+    // -- hex -----------------------------------------------------------------
+
+    fn hex_file(name: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join("mdlook-test-hex");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn read_hex_reads_any_file_whole_when_it_fits() {
+        let path = hex_file("small.bin", b"\x00\x01binary");
+        let content = Content::read_hex(&path);
+        let Content::Hex { bytes, size } = &content else { panic!("{content:?}") };
+        assert_eq!(bytes.as_slice(), b"\x00\x01binary");
+        assert_eq!(*size, 8);
+        let text = content.layout(80, &Theme::default()).plain.join("\n");
+        assert!(text.contains("00 01 62 69 6e 61 72 79"), "{text}");
+    }
+
+    #[test]
+    fn read_hex_caps_the_bytes_but_reports_the_whole_size() {
+        let path = hex_file("big.bin", &vec![0xab; MAX_HEX_BYTES as usize + 512]);
+        let content = Content::read_hex(&path);
+        let Content::Hex { bytes, size } = &content else { panic!("{content:?}") };
+        assert_eq!(bytes.len() as u64, MAX_HEX_BYTES, "the read stops at the cap");
+        assert_eq!(*size, MAX_HEX_BYTES + 512, "the size is still the whole file");
+        let first = content.layout(80, &Theme::default()).plain[0].clone();
+        assert!(first.contains("showing the first 1.0 MiB of"), "{first}");
+    }
+
+    #[test]
+    fn read_hex_failures_land_as_notes_not_errors() {
+        for path in ["/nonexistent/nope.bin", "/", "/dev/null"] {
+            let content = Content::read_hex(Path::new(path));
+            assert!(matches!(content, Content::Summary { .. }), "{path}: {content:?}");
+        }
     }
 
     #[test]
