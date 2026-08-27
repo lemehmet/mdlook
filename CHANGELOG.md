@@ -4,7 +4,7 @@ Notable changes, newest first. This project follows
 [semantic versioning](https://semver.org); while the major version is 0,
 breaking changes may land in a minor release.
 
-## Unreleased
+## v0.4.0 — 2026-08-27
 
 ### A hex viewer
 
