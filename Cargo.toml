@@ -1,6 +1,6 @@
 [package]
 name = "mdlook"
-version = "0.3.2"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.88"
 description = "Terminal markdown reader that reflows paragraphs to your terminal width and turns search into a navigable index of matches"
