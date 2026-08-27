@@ -4,6 +4,19 @@ Notable changes, newest first. This project follows
 [semantic versioning](https://semver.org); while the major version is 0,
 breaking changes may land in a minor release.
 
+## v0.3.2 — 2026-08-27
+
+### Installable with Homebrew
+
+- `brew install lemehmet/mdlook/mdlook`, on macOS or Linux. The formula
+  installs the same prebuilt binaries the release workflow built and tested,
+  and each release regenerates it automatically, so the tap cannot lag or
+  drift.
+- Releases now carry an Intel Mac binary alongside Apple Silicon, Linux
+  x86-64 and arm64, so every platform Homebrew serves installs prebuilt.
+
+The program itself is unchanged from v0.3.1.
+
 ## v0.3.1 — 2026-08-26
 
 ### PDFs show their text
