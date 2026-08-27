@@ -18,15 +18,17 @@ pub enum PopupKind {
     Links,
     Outline,
     Help,
+    About,
 }
 
 impl PopupKind {
     /// Whether moving the selection should scroll the document behind the popup.
     ///
     /// True for every index that points *into* the document — the preview is the
-    /// whole value of the list. Help points nowhere, so it stays put.
+    /// whole value of the list. Help and the about box point nowhere, so the
+    /// document stays put behind them.
     pub fn previews(self) -> bool {
-        !matches!(self, PopupKind::Help)
+        !matches!(self, PopupKind::Help | PopupKind::About)
     }
 }
 

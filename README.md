@@ -151,6 +151,7 @@ told us what it is.
 | `l` | list of links with their URLs |
 | `m` | image blocks: half → quadrant → sextant → octant |
 | `?` | help |
+| `a` | about mdlook |
 | `Enter` | jump to the selected entry |
 | `Esc` | cancel a list and return, or clear a search |
 | `q` | quit |
@@ -165,8 +166,10 @@ With the file browser open:
 | `Tab` | switch between the tree and the document |
 | `Ctrl-B` | show or hide the tree |
 | `j` `k` `↓` `↑` | move the selection — the document previews as you go |
-| `l` `h` `→` `←` | expand / collapse a directory |
+| `l` `h` | expand / collapse a directory |
 | `Enter` | open the selection |
+| `→` | read the selected file |
+| `←` | up to the parent directory; from the document, back to the tree |
 | `/` | filter the tree by name |
 | `.` | show or hide dotfiles |
 | `Esc` | clear the filter, or step back to the tree |
