@@ -19,13 +19,21 @@ cat README.md | mdlook    # reads stdin, dumps rather than opening a viewer
 
 ## Install
 
+With [Homebrew](https://brew.sh), on macOS or Linux:
+
+```sh
+brew install lemehmet/mdlook/mdlook
+```
+
+With the Rust toolchain:
+
 ```sh
 cargo install mdlook
 ```
 
 Or take a binary from [releases](https://github.com/lemehmet/mdlook/releases) —
-Linux x86-64 and arm64, macOS Apple Silicon. Each archive ships a SHA-256
-checksum:
+Linux x86-64 and arm64, macOS Apple Silicon and Intel. Each archive ships a
+SHA-256 checksum:
 
 ```sh
 shasum -a 256 -c mdlook-v0.2.1-aarch64-apple-darwin.tar.gz.sha256

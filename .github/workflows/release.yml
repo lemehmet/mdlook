@@ -25,10 +25,12 @@ jobs:
         include:
           - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
           - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
-          # Apple Silicon only. Intel Macs cannot run this binary and are not
-          # built for; that platform is served by building from source, which
-          # needs nothing but a Rust toolchain.
           - { os: macos-latest, target: aarch64-apple-darwin }
+          # GitHub retired its Intel Mac runners, so this one is cross-compiled
+          # on Apple Silicon — the only cross-compile in the matrix. The runner
+          # image ships Rosetta 2, so the "Check it runs" step still exercises
+          # the actual shipped binary rather than trusting the build.
+          - { os: macos-latest, target: x86_64-apple-darwin }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -58,8 +60,9 @@ jobs:
             exit 1
           fi
 
-      # Built natively on each platform rather than cross-compiled, so the
-      # version that ships is the one that was exercised here.
+      # Every target is run before it ships — natively where a runner exists,
+      # under Rosetta 2 for the Intel Mac build — so the version that ships is
+      # the one that was exercised here.
       - name: Check it runs
         run: |
           binary=./target/${{ matrix.target }}/release/mdlook
@@ -108,15 +111,85 @@ jobs:
           files: dist/*
           generate_release_notes: true
 
+  # The tap is what `brew install lemehmet/mdlook/mdlook` resolves. The formula
+  # is rendered fresh from the template in packaging/homebrew/ rather than
+  # patched in place, so the tap can never drift from what this repository says
+  # it should contain. The push uses a deploy key that can write to the tap
+  # repository and nothing else.
+  homebrew:
+    name: Homebrew tap
+    needs: publish
+    runs-on: ubuntu-latest
+    # `workflow_dispatch` is documented as a dry run. It must never reach here.
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Confirm the deploy key is configured
+        env:
+          HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+        run: |
+          if [ -z "$HOMEBREW_TAP_DEPLOY_KEY" ]; then
+            echo "::error::HOMEBREW_TAP_DEPLOY_KEY is not set. Add it under" \
+                 "Settings ▸ Secrets and variables ▸ Actions. The matching" \
+                 "public key must be a write-access deploy key on" \
+                 "lemehmet/homebrew-mdlook."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          repository: lemehmet/homebrew-mdlook
+          ssh-key: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+          path: tap
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Render the formula
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          sha() { cut -d' ' -f1 "dist/mdlook-${GITHUB_REF_NAME}-$1.tar.gz.sha256"; }
+          sed -e "s/__VERSION__/$version/g" \
+              -e "s/__SHA_AARCH64_APPLE__/$(sha aarch64-apple-darwin)/" \
+              -e "s/__SHA_X86_64_APPLE__/$(sha x86_64-apple-darwin)/" \
+              -e "s/__SHA_X86_64_LINUX__/$(sha x86_64-unknown-linux-gnu)/" \
+              -e "s/__SHA_AARCH64_LINUX__/$(sha aarch64-unknown-linux-gnu)/" \
+              packaging/homebrew/mdlook.rb > tap/Formula/mdlook.rb
+          # A placeholder that survived substitution would ship a formula that
+          # cannot install anywhere.
+          if grep -n '__[A-Z0-9_]*__' tap/Formula/mdlook.rb; then
+            echo "::error::unfilled placeholder in the rendered formula"
+            exit 1
+          fi
+
+      - name: Push to the tap
+        run: |
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/mdlook.rb
+          # A re-run of a release that already reached the tap lands here with
+          # nothing to change. That is a skip, not an error, for the same
+          # reason the crates.io job checks the index first.
+          if git diff --cached --quiet; then
+            echo "::notice::the tap already carries ${GITHUB_REF_NAME}; skipping"
+            exit 0
+          fi
+          git commit -m "mdlook ${GITHUB_REF_NAME}"
+          git push
+
   # Last, and deliberately so: this is the only step in the pipeline that cannot
   # be undone. A crates.io version can be yanked, which hides it from new
   # dependents, but it is never removed and the number is burned forever.
-  # Everything reversible — the three binaries, the GitHub release — has already
-  # succeeded by the time this runs, so a failure anywhere earlier costs nothing
-  # but a re-run.
+  # Everything reversible — the four binaries, the GitHub release, the Homebrew
+  # tap — has already succeeded by the time this runs, so a failure anywhere
+  # earlier costs nothing but a re-run.
   crates-io:
     name: crates.io
-    needs: publish
+    needs: [publish, homebrew]
     runs-on: ubuntu-latest
     # `workflow_dispatch` is documented as a dry run. It must never reach here.
     if: startsWith(github.ref, 'refs/tags/')
