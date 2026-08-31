@@ -128,7 +128,12 @@ with no `--browse` flag and no config asking for it, `mdlook README.md` behaves
 exactly as it always has. `mdlook --browse` on its own browses the working
 directory — asking for the browser is asking for a session, so there is nothing
 to wait on standard input for. A search stays live as you move through the tree, so
-you can walk a directory looking for where something is mentioned.
+you can walk a directory looking for where something is mentioned. Rows are
+coloured by what they are: pictures, PDFs, markdown, and source in C/C++, Rust,
+Go, Python and the JS/TS family. A dotfile is dim unless one of those already
+describes it, so `.gitignore` recedes while `.thumb.png` still reads as a
+picture. Under `--theme mono` or `NO_COLOR` the same classes are bold, italic
+and underlined rather than coloured.
 
 **Code is highlighted, and unknown code is left alone.** 47 common fence tags
 resolve, including the ones syntect's bundled syntaxes lack (TypeScript, Kotlin,

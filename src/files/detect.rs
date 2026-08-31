@@ -35,6 +35,63 @@ pub enum Kind {
 const MARKDOWN_EXTENSIONS: &[&str] =
     &["md", "markdown", "mdown", "mkd", "mkdn", "mdwn", "mdtxt", "mdtext", "rmd", "qmd"];
 
+/// What a file looks like to the browser, which is a coarser question than
+/// [`Kind`]: the reader is choosing what to open, not how to open it.
+///
+/// Names only, never content. The tree lists a directory without reading what
+/// is in it, and a classification that wanted bytes would cost a read per row —
+/// on a network mount that is the difference between a pane and a stall.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Class {
+    Image,
+    Pdf,
+    Markdown,
+    Source,
+    /// A dotfile that is none of the above.
+    Hidden,
+    /// Plain, and unremarkable about it.
+    Other,
+}
+
+/// The pictures worth a colour: what the viewer can render, plus the formats
+/// [`describe`] can name, so the tree and the pane agree on what a photo is.
+const IMAGE_EXTENSIONS: &[&str] = &[
+    "png", "jpg", "jpeg", "jpe", "jfif", "gif", "webp", "bmp", "tif", "tiff", "svg", "ico", "avif",
+    "heic", "heif",
+];
+
+/// Documents the viewer opens as extracted text rather than as bytes.
+const PDF_EXTENSIONS: &[&str] = &["pdf"];
+
+/// The languages with a real view here, plus the headers and module flavours
+/// that belong to them.
+///
+/// Deliberately narrower than what the highlighter knows. Colouring config
+/// files, logs and lockfiles as well would leave nothing for plain text to
+/// mean, and the point of the colours is to find the editable files.
+const SOURCE_EXTENSIONS: &[&str] = &[
+    "c", "h", "cc", "cpp", "cxx", "c++", "hpp", "hh", "hxx", "rs", "go", "py", "pyi", "pyw", "js",
+    "jsx", "mjs", "cjs", "ts", "tsx", "mts", "cts",
+];
+
+/// Which colour a name belongs to.
+///
+/// The class wins over the dot, because a hidden thumbnail is still a picture:
+/// `.thumb.png` is an image. A leading dot with no useful extension is what
+/// makes `.gitignore` a dotfile rather than a file called `gitignore` with an
+/// odd first character.
+pub fn class(name: &str) -> Class {
+    let ext = extension(name).map(str::to_ascii_lowercase);
+    match ext.as_deref() {
+        Some(ext) if IMAGE_EXTENSIONS.contains(&ext) => Class::Image,
+        Some(ext) if PDF_EXTENSIONS.contains(&ext) => Class::Pdf,
+        Some(ext) if MARKDOWN_EXTENSIONS.contains(&ext) => Class::Markdown,
+        Some(ext) if SOURCE_EXTENSIONS.contains(&ext) => Class::Source,
+        _ if name.starts_with('.') => Class::Hidden,
+        _ => Class::Other,
+    }
+}
+
 /// Classify a file from its name and the first [`SNIFF_LEN`] bytes.
 pub fn kind(name: &str, head: &[u8]) -> Kind {
     if is_binary(head) {
@@ -416,6 +473,39 @@ mod tests {
         assert_eq!(kind("README.MD", b"# Title"), Kind::Markdown);
         assert_eq!(kind("notes.txt", b"# Title"), Kind::Text, "a # does not make it markdown");
         assert_eq!(kind("Makefile", b"all:\n"), Kind::Text);
+    }
+
+    #[test]
+    fn a_class_is_decided_by_the_extension_case_first() {
+        assert_eq!(class("photo.jpg"), Class::Image);
+        assert_eq!(class("Photo.PNG"), Class::Image);
+        assert_eq!(class("scan.gif"), Class::Image);
+        assert_eq!(class("spec.pdf"), Class::Pdf);
+        assert_eq!(class("README.md"), Class::Markdown);
+        assert_eq!(class("main.c"), Class::Source);
+        assert_eq!(class("widget.cpp"), Class::Source);
+        assert_eq!(class("util.hpp"), Class::Source);
+        assert_eq!(class("lib.rs"), Class::Source);
+        assert_eq!(class("server.go"), Class::Source);
+        assert_eq!(class("tool.py"), Class::Source);
+        assert_eq!(class("view.tsx"), Class::Source);
+        assert_eq!(class("client.mts"), Class::Source);
+        assert_eq!(class("index.cjs"), Class::Source);
+    }
+
+    #[test]
+    fn a_dot_is_a_class_only_when_nothing_else_fits() {
+        assert_eq!(class(".gitignore"), Class::Hidden);
+        assert_eq!(class(".env"), Class::Hidden);
+        assert_eq!(class(".thumb.png"), Class::Image, "hidden, and still a picture");
+        assert_eq!(class(".notes.md"), Class::Markdown);
+    }
+
+    #[test]
+    fn an_unremarkable_name_is_no_class() {
+        assert_eq!(class("LICENSE"), Class::Other);
+        assert_eq!(class("notes.txt"), Class::Other);
+        assert_eq!(class("Cargo.lock"), Class::Other);
     }
 
     #[test]

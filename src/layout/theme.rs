@@ -49,6 +49,14 @@ pub struct Theme {
     pub line_number: Style,
     /// Directory rows in the file browser.
     pub tree_dir: Style,
+    /// Rows for the file types a reader scans a directory looking for. The
+    /// classes themselves live in [`crate::files::detect::Class`].
+    pub tree_image: Style,
+    pub tree_pdf: Style,
+    pub tree_markdown: Style,
+    pub tree_source: Style,
+    /// Dotfiles, when they are shown and nothing better describes them.
+    pub tree_hidden: Style,
     /// The browser's selection, when the browser has the keyboard.
     pub tree_selection: Style,
     /// The browser's selection when focus is in the document, so the reader can
@@ -112,6 +120,11 @@ impl Theme {
             code_fence_label: Style::new().fg(Color::DarkGray),
             line_number: Style::new().fg(Color::DarkGray),
             tree_dir: bold.fg(Color::Blue),
+            tree_image: Style::new().fg(Color::Magenta),
+            tree_pdf: Style::new().fg(Color::Red),
+            tree_markdown: Style::new().fg(Color::Cyan),
+            tree_source: Style::new().fg(Color::Yellow),
+            tree_hidden: Style::new().fg(Color::DarkGray).add_modifier(Modifier::DIM),
             tree_selection: Style::new().bg(Color::Cyan).fg(Color::Black),
             tree_selection_idle: Style::new().bg(Color::Rgb(0x30, 0x34, 0x3d)),
             tree_divider: Style::new().fg(Color::DarkGray),
@@ -155,6 +168,11 @@ impl Theme {
             code_block_bg: Some(Color::Rgb(0xf2, 0xf2, 0xf2)),
             code_block_fg: Style::new().fg(Color::Black),
             tree_dir: bold.fg(Color::Blue),
+            tree_image: Style::new().fg(Color::Magenta),
+            tree_pdf: Style::new().fg(Color::Red),
+            tree_markdown: bold,
+            tree_source: Style::new().fg(Color::Green),
+            tree_hidden: Style::new().fg(Color::DarkGray).add_modifier(Modifier::DIM),
             tree_selection: Style::new().bg(Color::Blue).fg(Color::White),
             tree_selection_idle: Style::new().bg(Color::Rgb(0xe2, 0xe4, 0xe8)),
             quote_text: Style::new().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
@@ -187,6 +205,11 @@ impl Theme {
             code_fence_label: plain.add_modifier(Modifier::DIM),
             line_number: plain.add_modifier(Modifier::DIM),
             tree_dir: bold,
+            tree_image: plain.add_modifier(Modifier::ITALIC),
+            tree_pdf: bold.add_modifier(Modifier::UNDERLINED),
+            tree_markdown: bold.add_modifier(Modifier::ITALIC),
+            tree_source: plain.add_modifier(Modifier::UNDERLINED),
+            tree_hidden: plain.add_modifier(Modifier::DIM),
             tree_selection: plain.add_modifier(Modifier::REVERSED),
             tree_selection_idle: plain.add_modifier(Modifier::UNDERLINED),
             tree_divider: plain.add_modifier(Modifier::DIM),

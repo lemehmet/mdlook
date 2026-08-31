@@ -4,6 +4,19 @@ Notable changes, newest first. This project follows
 [semantic versioning](https://semver.org); while the major version is 0,
 breaking changes may land in a minor release.
 
+## Unreleased
+
+### The browser colours what a file is
+
+- Rows now read at a glance: pictures, PDFs, markdown, and source in C/C++,
+  Rust, Go, Python and the JS/TS family each take a colour of their own, so
+  finding the editable files in a mixed directory is a glance rather than a
+  scan. Dotfiles come up dim — unless one of those classes already describes
+  them, because a hidden thumbnail is still a picture. The class comes from the
+  name alone, which is what keeps a directory of ten thousand entries from
+  costing ten thousand reads; `--theme mono` and `NO_COLOR` carry the same
+  five-way split in bold, italic and dim instead of hue.
+
 ## v0.4.0 — 2026-08-27
 
 ### A hex viewer

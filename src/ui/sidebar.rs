@@ -7,9 +7,11 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
+use crate::files::detect::{self, Class};
 use crate::files::tree::{Row, Tree};
 use crate::layout::wrap::{self, text_width};
 use crate::layout::Theme;
@@ -104,7 +106,7 @@ fn row_line(
         name.push_str(" →");
     }
 
-    let style = if row.is_dir { theme.tree_dir } else { theme.text };
+    let style = row_style(row, theme);
     let mut spans = wrap::truncate(
         vec![Span::styled(format!("{indent}{glyph}"), theme.popup_dim), Span::styled(name, style)],
         width,
@@ -126,9 +128,96 @@ fn row_line(
     Line::from(spans)
 }
 
+/// The colour of a row, decided from its name alone.
+///
+/// A class wins over a dot: a hidden thumbnail is still a picture, and knowing
+/// that is most of what the colours are for. A directory keeps the directory
+/// colour whatever it is called — the arrow beside it already says a folder is
+/// coming — while a dot-directory has no such marker, so the dim style carries
+/// that instead.
+fn row_style(row: &Row, theme: &Theme) -> Style {
+    let class = detect::class(&row.name);
+    if row.is_dir {
+        return if class == Class::Hidden { theme.tree_hidden } else { theme.tree_dir };
+    }
+    match class {
+        Class::Image => theme.tree_image,
+        Class::Pdf => theme.tree_pdf,
+        Class::Markdown => theme.tree_markdown,
+        Class::Source => theme.tree_source,
+        Class::Hidden => theme.tree_hidden,
+        Class::Other => theme.text,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
+    use crate::layout::ThemeKind;
+
+    fn entry(name: &str, is_dir: bool) -> Row {
+        Row {
+            path: PathBuf::from(name),
+            name: name.to_string(),
+            depth: 0,
+            is_dir,
+            is_link: false,
+            expanded: false,
+            note: None,
+        }
+    }
+
+    #[test]
+    fn each_kind_of_file_is_coloured_as_what_it_is() {
+        let theme = Theme::default();
+        for name in ["diagram.png", "photo.jpg", "banner.gif"] {
+            assert_eq!(row_style(&entry(name, false), &theme), theme.tree_image, "{name}");
+        }
+        assert_eq!(row_style(&entry("spec.pdf", false), &theme), theme.tree_pdf);
+        assert_eq!(row_style(&entry("README.md", false), &theme), theme.tree_markdown);
+        for name in ["main.c", "widget.hpp", "lib.rs", "server.go", "tool.py", "view.tsx"] {
+            assert_eq!(row_style(&entry(name, false), &theme), theme.tree_source, "{name}");
+        }
+        assert_eq!(row_style(&entry("LICENSE", false), &theme), theme.text);
+    }
+
+    #[test]
+    fn a_dot_is_dim_only_when_nothing_better_describes_the_file() {
+        let theme = Theme::default();
+        assert_eq!(row_style(&entry(".gitignore", false), &theme), theme.tree_hidden);
+        assert_eq!(row_style(&entry(".cache", true), &theme), theme.tree_hidden);
+        assert_eq!(row_style(&entry(".thumb.png", false), &theme), theme.tree_image);
+    }
+
+    #[test]
+    fn a_directory_stays_the_directory_colour() {
+        let theme = Theme::default();
+        assert_eq!(row_style(&entry("src", true), &theme), theme.tree_dir);
+        assert_eq!(row_style(&entry("notes.md", true), &theme), theme.tree_dir);
+    }
+
+    #[test]
+    fn no_two_classes_look_alike_in_any_theme() {
+        for kind in [ThemeKind::Dark, ThemeKind::Light, ThemeKind::Mono] {
+            let theme = Theme::new(kind);
+            let styles = [
+                ("dir", theme.tree_dir),
+                ("image", theme.tree_image),
+                ("pdf", theme.tree_pdf),
+                ("markdown", theme.tree_markdown),
+                ("source", theme.tree_source),
+                ("hidden", theme.tree_hidden),
+                ("plain", theme.text),
+            ];
+            for (index, (name, style)) in styles.iter().enumerate() {
+                for (other_name, other) in styles[index + 1..].iter() {
+                    assert_ne!(style, other, "{name} and {other_name} match in {kind:?}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn a_narrow_terminal_gives_the_whole_frame_to_the_document() {
