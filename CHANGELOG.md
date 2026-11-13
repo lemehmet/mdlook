@@ -4,7 +4,7 @@ Notable changes, newest first. This project follows
 [semantic versioning](https://semver.org); while the major version is 0,
 breaking changes may land in a minor release.
 
-## Unreleased
+## v0.4.1 — 2026-11-13
 
 ### Select and copy with the mouse
 
