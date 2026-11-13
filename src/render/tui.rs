@@ -3,7 +3,7 @@
 use anyhow::Result;
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, MouseEventKind,
+    KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -14,6 +14,7 @@ use ratatui::Frame;
 use crate::files::Tree;
 use crate::layout::wrap::text_width;
 use crate::layout::Theme;
+use crate::render::clipboard;
 use crate::ui::app::{App, Focus, Mode};
 use crate::ui::popup::{self, PopupKind};
 use crate::ui::sidebar;
@@ -84,23 +85,54 @@ fn event_loop(
                 app.message = None;
                 handle_key(app, key);
             }
-            Event::Mouse(mouse) => {
-                // Scroll whichever pane the pointer is over, which is the only
-                // reading of the gesture that does not surprise anyone.
-                let over_tree = app.browsing() && mouse.column < app.sidebar_columns;
-                match (mouse.kind, over_tree) {
-                    (MouseEventKind::ScrollDown, true) => app.tree_move(|t| t.step(3)),
-                    (MouseEventKind::ScrollUp, true) => app.tree_move(|t| t.step(-3)),
-                    (MouseEventKind::ScrollDown, false) => app.scroll_by(3),
-                    (MouseEventKind::ScrollUp, false) => app.scroll_by(-3),
-                    _ => {}
-                }
-            }
+            Event::Mouse(mouse) => handle_mouse(app, mouse),
             // The next draw re-reads the area, so just let it fall through.
             Event::Resize(..) => {}
             _ => {}
         }
     }
+}
+
+fn handle_mouse(app: &mut App, mouse: MouseEvent) {
+    let (column, row) = (mouse.column, mouse.row);
+    // Scroll whichever pane the pointer is over, which is the only reading of
+    // the gesture that does not surprise anyone.
+    let over_tree = app.browsing() && column < app.sidebar_columns;
+    match (mouse.kind, over_tree) {
+        (MouseEventKind::ScrollDown, true) => app.tree_move(|t| t.step(3)),
+        (MouseEventKind::ScrollUp, true) => app.tree_move(|t| t.step(-3)),
+        (MouseEventKind::ScrollDown, false) => app.scroll_by(3),
+        (MouseEventKind::ScrollUp, false) => app.scroll_by(-3),
+
+        // Selecting is for reading, and a popup or a prompt owns the screen.
+        (MouseEventKind::Down(MouseButton::Left), _) if app.mode == Mode::Normal => {
+            if app.select_start(column, row) {
+                app.message = None;
+            }
+        }
+        (MouseEventKind::Drag(MouseButton::Left), _) => app.select_drag(column, row),
+        (MouseEventKind::Up(MouseButton::Left), _) => {
+            if let Some(text) = app.select_end(column, row) {
+                copy(app, &text);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Copy text and say so on the status bar.
+fn copy(app: &mut App, text: &str) {
+    let confirmed = clipboard::copy(text);
+    let chars = text.chars().count();
+    let noun = if chars == 1 { "char" } else { "chars" };
+    // Without a clipboard tool the copy went out as OSC 52 only, which the
+    // terminal may or may not honour; the bar should not promise more than
+    // was done.
+    app.message = Some(if confirmed {
+        format!("copied {chars} {noun}")
+    } else {
+        format!("sent {chars} {noun} to the terminal clipboard")
+    });
 }
 
 /// How wide to lay the document out, for the pane it has been given.
@@ -163,6 +195,7 @@ fn draw(frame: &mut Frame, app: &mut App, max_width: Option<usize>) {
     // browser is a width change like any other, and re-anchors the same way.
     // The viewport goes first because an image lays out to fit it.
     app.viewport = body.height as usize;
+    app.body = body;
     app.relayout(content_width(body, max_width));
     // Height changes can leave the scroll past the new end of the document.
     app.scroll_by(0);
@@ -196,12 +229,22 @@ fn draw_body(frame: &mut Frame, app: &App, area: Rect) {
     let lines: Vec<Line<'static>> = (app.scroll..end)
         .map(|index| {
             let line = &app.rendered.lines[index];
+            let mut marks: Vec<(std::ops::Range<usize>, Style)> = Vec::new();
             if app.search.is_active() {
-                let hits: Vec<_> = app.search.on_line(index).collect();
-                paint_matches(line, &hits, &app.theme)
-            } else {
-                line.clone()
+                marks.extend(app.search.on_line(index).map(|(hit, current)| {
+                    let style =
+                        if current { app.theme.search_current } else { app.theme.search_match };
+                    (hit.start..hit.end, style)
+                }));
             }
+            // Last, so it shows on top of a search hit it overlaps.
+            let selected = app.selection.as_ref().and_then(|s| {
+                s.bytes_on(index, &app.rendered.plain[index], app.rendered.content_offset)
+            });
+            if let Some(bytes) = selected {
+                marks.push((bytes, Style::new().add_modifier(Modifier::REVERSED)));
+            }
+            paint(line, &marks)
         })
         .collect();
 
@@ -271,18 +314,15 @@ fn render_bar(frame: &mut Frame, area: Rect, spans: Vec<Span<'static>>, theme: &
     Paragraph::new(Line::from(spans)).render(area, frame.buffer_mut());
 }
 
-/// Repaint a line with search hits highlighted.
+/// Repaint a line with byte ranges of it restyled: search hits, the mouse
+/// selection.
 ///
-/// Hits are byte ranges into the line's plain text, so this walks the spans
-/// tracking byte offsets and splits any span a hit starts or ends inside of. The
-/// original style is patched rather than replaced, so highlighted code stays
-/// recognisably code.
-fn paint_matches(
-    line: &Line<'static>,
-    hits: &[(crate::ui::search::Match, bool)],
-    theme: &Theme,
-) -> Line<'static> {
-    if hits.is_empty() {
+/// Ranges are byte offsets into the line's plain text, so this walks the spans
+/// tracking byte offsets and splits any span a range starts or ends inside of.
+/// The original style is patched rather than replaced, so highlighted code stays
+/// recognisably code. Where ranges overlap, later ones patch over earlier ones.
+fn paint(line: &Line<'static>, marks: &[(std::ops::Range<usize>, Style)]) -> Line<'static> {
+    if marks.is_empty() {
         return line.clone();
     }
 
@@ -296,8 +336,8 @@ fn paint_matches(
 
         // Every boundary that falls strictly inside this span becomes a cut.
         let mut cuts = vec![span_start, span_end];
-        for (hit, _) in hits {
-            for edge in [hit.start, hit.end] {
+        for (range, _) in marks {
+            for edge in [range.start, range.end] {
                 if edge > span_start && edge < span_end {
                     cuts.push(edge);
                 }
@@ -312,11 +352,10 @@ fn paint_matches(
             if piece.is_empty() {
                 continue;
             }
-            let style = match hits.iter().find(|(h, _)| from >= h.start && to <= h.end) {
-                Some((_, true)) => span.style.patch(theme.search_current),
-                Some((_, false)) => span.style.patch(theme.search_match),
-                None => span.style,
-            };
+            let style = marks
+                .iter()
+                .filter(|(range, _)| from >= range.start && to <= range.end)
+                .fold(span.style, |style, (_, mark)| style.patch(*mark));
             out.push(Span::styled(piece.to_string(), style));
         }
     }
@@ -351,8 +390,21 @@ fn shared_key(app: &mut App, key: KeyEvent) -> bool {
         app.toggle_sidebar();
         return true;
     }
+    // A selection is cleared before Escape means anything else, in either
+    // pane: it is the most recent thing the reader did, and in the tree the
+    // next meaning of Escape is quitting.
+    if key.code == KeyCode::Esc && app.selection.is_some() {
+        app.selection = None;
+        return true;
+    }
     match key.code {
         KeyCode::Char('q') => app.quit = true,
+        // Copy again, for when the copy on release went somewhere unhelpful.
+        // Shared because the selection is still on screen after Tab.
+        KeyCode::Char('y') => match app.selection_text() {
+            Some(text) => copy(app, &text),
+            None => app.message = Some("nothing selected — drag to select".into()),
+        },
         KeyCode::Char('?') => app.open_popup(PopupKind::Help),
         KeyCode::Char('a') => app.open_popup(PopupKind::About),
         KeyCode::Tab | KeyCode::BackTab => app.toggle_focus(),

@@ -22,7 +22,10 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1.0"
 clap = { version = "4.6", features = ["derive"] }
-crossterm = "0.29"
+# `osc52` writes the selection to the clipboard through the terminal, which is
+# the one route that also works over SSH. Its only dependency, base64, is
+# already in the tree.
+crossterm = { version = "0.29", features = ["osc52"] }
 pulldown-cmark = { version = "0.13", default-features = false, features = ["simd", "html"] }
 ratatui = "0.30"
 unicode-width = "0.2"

@@ -4,6 +4,21 @@ Notable changes, newest first. This project follows
 [semantic versioning](https://semver.org); while the major version is 0,
 breaking changes may land in a minor release.
 
+## Unreleased
+
+### Select and copy with the mouse
+
+- Dragging in the document now selects text, and releasing copies it to the
+  clipboard. Capturing the mouse for wheel scrolling had taken away the
+  terminal's own selection, leaving no way to copy from a document at all.
+  The selection stays inside the document pane, keeps its place as you
+  scroll, scrolls the pane when dragged along its edge, and leaves line
+  numbers out of a copy from source. `y` copies it again and `Esc` clears it.
+- The copy goes out as OSC 52, which reaches the clipboard over SSH and
+  through tmux, and through `pbcopy`, `wl-copy`, `xclip` or `xsel` when one is
+  installed, which covers terminals that ignore OSC 52, such as macOS
+  Terminal. Lines break where they wrapped on screen.
+
 ## v0.4.0 — 2026-08-27
 
 ### A hex viewer

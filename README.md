@@ -151,14 +151,25 @@ told us what it is.
 | `l` | list of links with their URLs |
 | `m` | image blocks: half → quadrant → sextant → octant |
 | `x` | hex view of the file — `x` again to go back |
+| `y` | copy the mouse selection again |
 | `?` | help |
 | `a` | about mdlook |
 | `Enter` | jump to the selected entry |
-| `Esc` | cancel a list and return, or clear a search |
+| `Esc` | cancel a list and return, or clear the selection, then a search |
 | `q` | quit |
 
 Inside any list, `↑`/`↓` move the selection and preview it in place; `Enter`
-commits and `Esc` puts you back exactly where you started. Mouse wheel scrolls.
+commits and `Esc` puts you back exactly where you started.
+
+The mouse wheel scrolls whichever pane it is over. Dragging in the document
+selects text — only the document's, never the tree or the status bar beside it
+— and releasing copies it to the clipboard. Moving the pointer along the top or
+bottom edge while dragging scrolls a line per movement, and the wheel scrolls
+mid-drag too, so a selection can run longer than a screen. Line numbers in the
+source view are left out. The copy goes through the terminal (OSC 52, which
+also works over SSH and inside tmux with `set-clipboard on`) and through
+`pbcopy`, `wl-copy`, `xclip` or `xsel` when one is installed. Copied lines
+break where they wrapped on screen.
 
 With the file browser open:
 
