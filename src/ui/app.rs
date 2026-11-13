@@ -1,5 +1,6 @@
 //! Viewer state and the transitions between its modes.
 
+use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
@@ -11,6 +12,7 @@ use crate::files::Tree;
 use crate::layout::{wrap::text_width, RenderedDoc, Theme};
 use crate::ui::popup::{Popup, PopupKind, PopupRow};
 use crate::ui::search::Search;
+use crate::ui::selection::{Point, Selection};
 
 /// How long the browser's selection must rest on an expensive file — an image
 /// to decode, a PDF to extract — before that work runs. Short enough to feel
@@ -80,6 +82,12 @@ pub struct App {
     /// a small terminal and disappears entirely on a very small one.
     pub sidebar_columns: u16,
     pub focus: Focus,
+    /// Where the document pane was drawn last frame, recorded by the renderer
+    /// for the same reason as `sidebar_columns`: a mouse event arrives in
+    /// screen cells and has to be mapped back onto the document.
+    pub body: Rect,
+    /// Text being, or last, selected with the mouse.
+    pub selection: Option<Selection>,
     /// What the document pane is currently showing, so moving the selection
     /// onto a file already open does not re-read and re-highlight it.
     previewed: Option<PathBuf>,
@@ -126,6 +134,8 @@ impl App {
             probe_command: None,
             sidebar_columns: 0,
             focus: Focus::Content,
+            body: Rect::default(),
+            selection: None,
             previewed: None,
             restore_filter: String::new(),
             image_options: ImageOptions::default(),
@@ -249,6 +259,8 @@ impl App {
     fn relayout_in_place(&mut self) {
         let height = Some(self.viewport);
         self.rendered = self.content.layout_sized(self.rendered.width.max(8), height, &self.theme);
+        // The coordinates belonged to the old layout.
+        self.selection = None;
         self.layout_height = height;
     }
 
@@ -506,6 +518,8 @@ impl App {
 
         self.rendered = self.content.layout_sized(width, height, &self.theme);
         self.layout_height = height;
+        // Reflowing moves every word, so the selected cells now hold other text.
+        self.selection = None;
 
         self.scroll = match anchored {
             Some((index, offset)) => match self.rendered.anchors.get(index) {
@@ -539,6 +553,92 @@ impl App {
                 popup.jump(selected);
             }
         }
+    }
+
+    // -- mouse selection ---------------------------------------------------
+
+    /// The document cell under a screen position, clamped into the pane.
+    ///
+    /// Clamping rather than refusing is what lets a drag run off the edge of
+    /// the pane and keep selecting to the start or end of the visible lines.
+    fn point_at(&self, column: u16, row: u16) -> Option<Point> {
+        let body = self.body;
+        if self.rendered.is_empty() || body.width == 0 || body.height == 0 {
+            return None;
+        }
+        let row = row.clamp(body.y, body.y + body.height - 1) - body.y;
+        let column = column.max(body.x) - body.x;
+        let line = (self.scroll + row as usize).min(self.rendered.len() - 1);
+        Some(Point { line, column: column as usize })
+    }
+
+    /// Start a selection at a press of the left button. Returns whether the
+    /// press landed in the document pane, which is the only place it counts.
+    pub fn select_start(&mut self, column: u16, row: u16) -> bool {
+        let body = self.body;
+        let inside = column >= body.x
+            && column < body.x + body.width
+            && row >= body.y
+            && row < body.y + body.height;
+        if !inside {
+            return false;
+        }
+        self.selection = self.point_at(column, row).map(Selection::new);
+        // Clicking in the document is as clear a statement of where the reader
+        // is working as Tab would be.
+        self.focus = Focus::Content;
+        true
+    }
+
+    /// Extend the selection while the button is held, scrolling a line when the
+    /// pointer is dragged past the top or bottom of the pane.
+    pub fn select_drag(&mut self, column: u16, row: u16) {
+        if !self.selection.is_some_and(|s| s.dragging) {
+            return;
+        }
+        // The pane starts on the terminal's top row, so there is no row above it
+        // for the pointer to reach: the top row itself is the edge. It only
+        // counts once the drag has left the line it began on, or sweeping
+        // sideways along a selection that starts up there would scroll too.
+        let anchor = self.selection.map(|s| s.anchor.line).unwrap_or(0);
+        if row <= self.body.y && anchor > self.scroll {
+            self.scroll_by(-1);
+        } else if row >= self.body.y + self.body.height {
+            self.scroll_by(1);
+        }
+        self.extend_to(column, row);
+    }
+
+    fn extend_to(&mut self, column: u16, row: u16) {
+        if let (Some(point), Some(selection)) =
+            (self.point_at(column, row), self.selection.as_mut())
+        {
+            selection.head = point;
+        }
+    }
+
+    /// Finish the drag and return the text to copy, if any was selected. A
+    /// click that never moved clears the old selection instead.
+    pub fn select_end(&mut self, column: u16, row: u16) -> Option<String> {
+        if !self.selection.is_some_and(|s| s.dragging) {
+            return None;
+        }
+        // Not `select_drag`: letting go on the edge row is not a request to
+        // scroll one more line past where the reader stopped.
+        self.extend_to(column, row);
+        let selection = self.selection.as_mut()?;
+        selection.dragging = false;
+        if selection.is_empty() {
+            self.selection = None;
+            return None;
+        }
+        self.selection_text()
+    }
+
+    /// The selected text, or `None` when there is nothing selected.
+    pub fn selection_text(&self) -> Option<String> {
+        let text = self.selection.as_ref()?.text(&self.rendered);
+        (!text.is_empty()).then_some(text)
     }
 
     // -- search ------------------------------------------------------------
@@ -744,7 +844,10 @@ fn help_popup(theme: &Theme, browsing: bool) -> Popup {
         ("", ""),
         ("/", "search — results list opens as you type"),
         ("n / N", "next / previous match"),
-        ("Esc", "clear search"),
+        ("Esc", "clear selection, then search"),
+        ("", ""),
+        ("drag", "select text — copied to the clipboard on release"),
+        ("y", "copy the selection again"),
         ("", ""),
         ("t", "outline of headings"),
         ("l", "list of links"),

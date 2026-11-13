@@ -4,10 +4,12 @@
 //! the behaviour actually lives, and testing it without a pty keeps these fast
 //! and deterministic. `tests/tui_capture.py` covers the drawing layer manually.
 
+use mdlook::content::Content;
 use mdlook::parse;
 use mdlook::ui::app::{App, Mode};
 use mdlook::ui::popup::PopupKind;
 use mdlook::Theme;
+use ratatui::layout::Rect;
 
 const DOC: &str = "\
 # Alpha
@@ -363,4 +365,149 @@ fn a_named_file_toggles_to_hex_and_back() {
 
     app.toggle_hex();
     assert!(matches!(app.content, mdlook::Content::Markdown(_)), "back to rendered markdown");
+}
+
+// -- mouse selection -------------------------------------------------------
+
+/// An app whose document pane sits at (`x`, `y`), as if beside a browser.
+fn pane_at(mut app: App, x: u16, y: u16) -> App {
+    app.body = Rect { x, y, width: 60, height: 10 };
+    app.viewport = 10;
+    app
+}
+
+/// The screen row on which document line `line` is drawn.
+fn row_of(app: &App, line: usize) -> u16 {
+    app.body.y + (line - app.scroll) as u16
+}
+
+fn line_of(app: &App, needle: &str) -> usize {
+    app.rendered.plain.iter().position(|l| l.contains(needle)).expect("line not found")
+}
+
+#[test]
+fn dragging_across_a_line_copies_what_was_under_the_pointer() {
+    let mut app = pane_at(app(), 30, 2);
+    let line = line_of(&app, "Alpha body");
+    let column = app.rendered.plain[line].find("Alpha body").unwrap() as u16;
+    let row = row_of(&app, line);
+
+    assert!(app.select_start(30 + column, row));
+    app.select_drag(30 + column + 5, row);
+    let copied = app.select_end(30 + column + 9, row);
+    assert_eq!(copied.as_deref(), Some("Alpha body"));
+}
+
+#[test]
+fn a_selection_spans_lines_and_trims_trailing_blanks() {
+    let mut app = pane_at(app(), 0, 0);
+    app.body.height = 30;
+    app.viewport = 30;
+    let first = line_of(&app, "Beta body");
+    let last = line_of(&app, "Another paragraph");
+    app.select_start(0, row_of(&app, first));
+    let text = app.select_end(6, row_of(&app, last)).unwrap();
+    assert_eq!(text, "Beta body. Filler filler filler.\n\nAnother");
+}
+
+#[test]
+fn a_drag_backwards_copies_the_same_text() {
+    let mut forward = pane_at(app(), 0, 0);
+    let line = line_of(&forward, "Beta body");
+    let row = row_of(&forward, line);
+    forward.select_start(0, row);
+    let a = forward.select_end(8, row);
+
+    let mut backward = pane_at(app(), 0, 0);
+    backward.select_start(8, row);
+    let b = backward.select_end(0, row);
+    assert_eq!(a, b);
+    assert_eq!(a.as_deref(), Some("Beta body"));
+}
+
+#[test]
+fn a_click_without_a_drag_clears_rather_than_copies() {
+    let mut app = pane_at(app(), 0, 0);
+    app.select_start(0, 1);
+    assert!(app.select_end(4, 1).is_some());
+    assert!(app.selection.is_some(), "a finished selection stays visible");
+
+    app.select_start(2, 3);
+    assert_eq!(app.select_end(2, 3), None);
+    assert!(app.selection.is_none());
+}
+
+#[test]
+fn presses_outside_the_document_pane_are_not_selections() {
+    // The browser occupies the columns left of the pane.
+    let mut app = pane_at(app(), 30, 0);
+    assert!(!app.select_start(10, 2), "a press on the tree");
+    assert!(!app.select_start(40, 12), "a press on the status bar");
+    app.select_drag(45, 3);
+    assert_eq!(app.select_end(45, 3), None);
+    assert!(app.selection.is_none());
+}
+
+#[test]
+fn dragging_past_the_bottom_scrolls_and_keeps_selecting() {
+    let mut app = pane_at(app(), 0, 0);
+    app.viewport = 4;
+    app.body.height = 4;
+    app.select_start(0, 0);
+    for _ in 0..3 {
+        app.select_drag(5, 10);
+    }
+    assert_eq!(app.scroll, 3, "each drag past the edge scrolls a line");
+    let text = app.select_end(5, 10).unwrap();
+    // Lines 0 through 6: the whole of what was scrolled through.
+    assert_eq!(text.lines().count(), 7, "{text:?}");
+}
+
+#[test]
+fn reflowing_drops_the_selection() {
+    let mut app = pane_at(app(), 0, 0);
+    app.select_start(0, 0);
+    app.select_end(5, 2);
+    assert!(app.selection.is_some());
+    app.relayout(40);
+    assert!(app.selection.is_none(), "the cells now hold different text");
+}
+
+#[test]
+fn line_numbers_are_left_out_of_a_copy_from_source() {
+    let content =
+        Content::Text { name: "x.rs".into(), body: "fn main() {\n    run();\n}\n".into() };
+    let mut app = pane_at(App::new(content, "x.rs".into(), Theme::default(), 60), 0, 0);
+    let first = line_of(&app, "fn main");
+    let last = line_of(&app, "run();");
+    app.select_start(0, row_of(&app, first));
+    let text = app.select_end(59, row_of(&app, last)).unwrap();
+    assert_eq!(text, "fn main() {\n    run();");
+}
+
+#[test]
+fn dragging_onto_the_top_row_scrolls_back_up() {
+    // The pane sits on the terminal's first row, so the pointer can never be
+    // reported above it; the top row has to serve as the edge.
+    let mut app = pane_at(app(), 0, 0);
+    app.viewport = 4;
+    app.body.height = 4;
+    app.scroll = 5;
+    app.select_start(4, 3);
+    app.select_drag(4, 0);
+    app.select_drag(4, 0);
+    assert_eq!(app.scroll, 3);
+    app.select_end(0, 0).unwrap();
+    assert_eq!(app.scroll, 3, "letting go does not scroll");
+    assert_eq!(app.selection.unwrap().head.line, 3);
+}
+
+#[test]
+fn sweeping_along_the_top_row_does_not_scroll() {
+    let mut app = pane_at(app(), 0, 0);
+    app.scroll = 5;
+    app.select_start(0, 0);
+    app.select_drag(10, 0);
+    app.select_drag(20, 0);
+    assert_eq!(app.scroll, 5);
 }
